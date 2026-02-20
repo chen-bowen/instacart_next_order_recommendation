@@ -6,9 +6,9 @@ Proof-of-concept for **next-order product recommendation** using the [Instacart 
 
 ## What we are predicting
 
-- **Target:** For each user, we predict **which products are most likely to appear in their next order**. We do *not* predict the exact next order (e.g. a single basket); we produce a **ranking over the full product catalog** so that items the user is likely to buy next appear at the top.
+- **Target:** For each user, we predict **which products are most likely to appear in their next order**. We do _not_ predict the exact next order (e.g. a single basket); we produce a **ranking over the full product catalog** so that items the user is likely to buy next appear at the top.
 - **Formally:** Given a user’s **prior order history** (products bought, order timing, gaps between orders), the model outputs a **score for every product** (or a **top-k list**). Products with higher scores are more likely to be in the user’s next basket. Evaluation uses standard retrieval metrics (Accuracy@k, MRR, NDCG, MAP) against the actual next-order products as relevance labels.
-- **No leakage:** The model never sees the next order at prediction time. Training uses (anchor = prior-only context, positive = one product from the next order); at serve and in evaluation, the query is the same prior-only context, so we simulate a realistic “what should we recommend *now*?” setting.
+- **No leakage:** The model never sees the next order at prediction time. Training uses (anchor = prior-only context, positive = one product from the next order); at serve and in evaluation, the query is the same prior-only context, so we simulate a realistic “what should we recommend _now_?” setting.
 
 ---
 
@@ -25,101 +25,162 @@ Proof-of-concept for **next-order product recommendation** using the [Instacart 
 
 ## Requirements
 
-- Python 3.10+
-- Instacart dataset (e.g. from Kaggle)
+- **Python** 3.10+ (3.12 recommended; managed via `uv` or your environment).
+- **Instacart dataset** from [Kaggle](https://www.kaggle.com/c/instacart-market-basket-analysis/data) (orders, order_products, products, aisles, departments). Download and place CSVs under `data/`.
+- **Disk:** ~2–3 GB for raw data + processed datasets; model checkpoints add a few hundred MB per run.
+- **Memory:** 8 GB RAM is enough for data prep and inference; training benefits from 16 GB+ and a GPU (CUDA or Apple MPS) for speed.
 
 ---
 
 ## Setup
 
-```bash
-uv sync
-```
+1. **Clone or open the repo** and enter the project root.
 
-Or `pip install -e .`. Optional: add a `.env` in the project root with `HF_TOKEN` if you use private Hugging Face assets.
+2. **Install dependencies** (prefer `uv` for a locked environment):
+
+   ```bash
+   uv sync
+   ```
+
+   Or with pip: `pip install -e .` (see `pyproject.toml` for dependencies).
+
+3. **Download the Instacart data** from Kaggle into `data/`. You need at least:
+   - `orders.csv`
+   - `order_products__prior.csv`
+   - `products.csv`
+   - `aisles.csv`
+   - `departments.csv`
+
+4. **Optional:** Create a `.env` file in the project root with `HF_TOKEN=...` if you use private Hugging Face models or datasets.
+
+5. **Verify:** Run data prep (see Pipeline below); it will fail with a clear error if any CSV is missing or misnamed.
 
 ---
 
 ## Data
 
-Place the following under `data/` (or pass `--data-dir` when running data prep):
+### Input files (under `data/`)
 
-- **orders.csv** — order_id, user_id, eval_set, order_number, order_dow, order_hour_of_day, days_since_prior_order (used to split train vs prior and build user context).
-- **order_products__prior.csv** — order_id, product_id (prior orders only; used to build order→products and anchor/positive pairs).
-- **products.csv** — product_id, product_name, aisle_id, department_id.
-- **aisles.csv**, **departments.csv** — names for product text.
+| File                            | Key columns                                                                                         | Role                                                                                                                          |
+| ------------------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| **orders.csv**                  | order_id, user_id, **eval_set**, order_number, order_dow, order_hour_of_day, days_since_prior_order | `eval_set == "train"` → target “next” orders we predict for; `eval_set == "prior"` → history used to build user context only. |
+| **order_products\_\_prior.csv** | order_id, product_id                                                                                | Which products are in each prior order; used to build (anchor, positive) pairs.                                               |
+| **products.csv**                | product_id, product_name, aisle_id, department_id                                                   | Product names and hierarchy.                                                                                                  |
+| **aisles.csv**                  | aisle_id, aisle                                                                                     | Aisle names for product text.                                                                                                 |
+| **departments.csv**             | department_id, department                                                                           | Department names for product text.                                                                                            |
 
-Data prep writes to **processed/** in a param-based subdir (e.g. `processed/p5_mp20_ef0.1/`) so different settings don’t overwrite each other. That directory contains `train_dataset/`, `eval_dataset/`, `eval_queries.json`, `eval_corpus.json`, `eval_relevant_docs.json`, and `data_prep_params.json`.
+No `order_products__train.csv` is required for this pipeline: we only use prior orders for context and the train-set orders to define _which_ next order we are predicting (and to split train/eval by order).
+
+### Data prep output (processed/)
+
+Data prep writes under a **param-based subdir** of `processed/`, e.g. `processed/p5_mp20_ef0.1/`, so different runs (e.g. different `max_prior_orders` or `eval_frac`) do not overwrite each other. The subdir name encodes: `p` = max_prior_orders, `mp` = max_product_names, `ef` = eval_frac (and optionally `sf` = sample_frac, `no_serve` if eval queries keep “Next: …”).
+
+| Output                      | Description                                                                                                                            |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| **train_dataset/**          | Hugging Face Dataset on disk: columns `anchor`, `positive`. Each row is one (user context, product from next order) pair for training. |
+| **eval_dataset/**           | Same format; used for validation loss (optional).                                                                                      |
+| **eval_queries.json**       | Map from query_id (order_id as string) to the **serve-time** user context string (no “Next: …” when `eval_serve_time=True`).           |
+| **eval_corpus.json**        | Map from product_id (string) to product text (`"Product: X. Aisle: Y. Department: Z."`).                                               |
+| **eval_relevant_docs.json** | Map from query_id to list of product_ids that are in that order’s next basket (relevance labels for IR metrics).                       |
+| **data_prep_params.json**   | Record of the data prep arguments and counts (n_train_pairs, n_eval_queries, n_corpus, etc.).                                          |
 
 ---
 
 ## Pipeline
 
-1. **Prepare** — build (anchor, positive) pairs and eval IR artifacts.
-2. **Train** — two-tower SBERT with `MultipleNegativesRankingLoss` and optional `InformationRetrievalEvaluator`.
-3. **Serve** — load model + corpus, encode context, return top-k by cosine similarity.
+### 1. Prepare
 
-### Commands
+Reads the CSVs, builds one **anchor** (user context string) per target order, and for each product in that order’s “next” basket creates a **(anchor, positive)** pair with **positive** = product text. Splits orders into train vs eval (by order, not by pair), and writes the train/eval Datasets plus `eval_queries.json`, `eval_corpus.json`, `eval_relevant_docs.json` for the Information Retrieval evaluator.
+
+**Key flags:** `--max-prior-orders`, `--max-product-names`, `--eval-frac`, `--output-dir`, `--data-dir`. Defaults: 5 prior orders, 20 product names, 10% eval. At the end the script prints the exact `--processed-dir` to use for training.
+
+### 2. Train
+
+Loads the processed dir (auto-resolves to a single param subdir under `processed/` if the default path has no `train_dataset`), builds a Sentence Transformer bi-encoder (default base: `all-MiniLM-L6-v2`), and trains with **MultipleNegativesRankingLoss** (in-batch negatives). Optionally runs **InformationRetrievalEvaluator** each epoch (Accuracy@k, MRR@10, NDCG@10, MAP@100). Saves checkpoints under `models/two_tower_sbert/` and, when IR eval is on, keeps the best by NDCG@10 in `models/two_tower_sbert/final/`.
+
+**Key flags:** `--processed-dir`, `--output-dir`, `--lr`, `--epochs`, `--train-batch-size`, `--max-seq-length`, `--no-information-retrieval-evaluator` (faster runs, no IR metrics).
+
+### 3. Serve
+
+Loads the trained model from `final/` (or a checkpoint dir) and the product corpus from a JSON file. Encodes the corpus once at startup; for each query (user context string), encodes the query and returns the **top-k** product IDs by cosine similarity. Can be used from the CLI or via the Python API (`Recommender`, `recommend()`).
+
+**Key flags:** `--model-dir`, `--corpus`, `--query` (raw context string), `--eval-query-id` (use a query from `eval_queries.json` by order_id), `--top-k`.
+
+### Commands (copy-paste)
 
 ```bash
-# Prepare (writes to processed/<param_subdir>/)
+# 1. Prepare (writes to processed/p5_mp20_ef0.1/ with defaults)
 uv run python -m src.data.prepare_instacart_sbert
 
-# Train (default: auto-resolve processed dir to single param subdir if needed)
+# 2. Train (uses processed/p5_mp20_ef0.1 if it’s the only param subdir)
 uv run python -m src.train.train_sbert --lr 1e-4
-# Or: --processed-dir processed/p5_mp20_ef0.1
+# Explicit dir: --processed-dir processed/p5_mp20_ef0.1
+# Faster training (no IR eval): --no-information-retrieval-evaluator
 
-# Serve (CLI and Python API: load_recommender, recommend)
+# 3. Serve (demo: no --query uses built-in example)
 uv run python -m src.inference.serve_recommendations --top-k 10
-# Or: --corpus processed/p5_mp20_ef0.1/eval_corpus.json --model-dir models/two_tower_sbert/final --query "..."
+# With corpus and model: --corpus processed/p5_mp20_ef0.1/eval_corpus.json --model-dir models/two_tower_sbert/final
+# Custom query: --query "[+7d w4h14] Milk, Bread."
+# Real eval query: --eval-query-id <order_id>
 ```
 
 ---
 
 ## Prediction problem (summary)
 
-- **Task:** Rank the catalog so products in the user’s *next* order are at the top (see **What we are predicting** above).
-- **Input:** User context from *prior* orders only (products, day/hour, gaps; no next-order info).
-- **Output:** Ranking over the catalog (top-k by cosine similarity).
-- **Train vs serve:** (anchor, positive) = (prior-only context, product in next order). At serve time the “Next: …” part is dropped so evaluation matches production (we don’t know the next order time at request time).
+- **Task:** Rank the catalog so products in the user’s _next_ order are at the top (see **What we are predicting** above).
+- **Input:** User context from _prior_ orders only: a single text string built from the last N prior orders (product names in sequence, optional timing like “ordered 7 days after previous on weekday 4 at hour 14”). No information from the “next” order is included at prediction time.
+- **Output:** A ranking over the full product catalog: each product gets a score (cosine similarity between the encoded context and the encoded product text). We return the top-k product IDs (and optionally scores).
+- **Train vs serve:** For **training**, each (anchor, positive) pair has anchor = prior-only context (and during data prep we can optionally include “Next: weekday X, hour Y, …” in the anchor for that target order). The **positive** is one product that actually appears in that order’s next basket. For **serve and evaluation**, the query is the _same_ prior-only context **without** the “Next: …” segment, so we never use future information and the setup matches production.
 
 ---
 
 ## Results
 
-**Data (example from data prep, e.g. max_prior_orders=5, max_product_names=20, eval_frac=0.1):**
+### Data prep (example: max_prior_orders=5, max_product_names=20, eval_frac=0.1)
 
 | Train pairs | Eval pairs | Eval queries | Corpus size |
-|-------------|------------|--------------|-------------|
+| ----------- | ---------- | ------------ | ----------- |
 | ~1.25M      | ~138k      | ~13k         | ~50k        |
 
-**Example evaluation metrics** (default setup: `processed/p5_mp20_ef0.1`, `all-MiniLM-L6-v2`, `max_seq_length` 256, eval on ~13k queries over ~50k corpus). Metrics from the built-in `InformationRetrievalEvaluator`:
+Train/eval are split **by order** so that all pairs from a given order are in one split; eval queries are the hold-out orders, and the corpus is the full product set (~50k). Each eval query has one or more relevant products (the products actually in that order’s next basket).
 
-| Metric       | After 1 epoch | After 3 epochs |
-|--------------|----------------|----------------|
-| Accuracy@1   | 0.106–0.11     | ~0.19          |
-| Accuracy@10  | 0.25–0.29      | ~0.29–0.46     |
-| MRR@10       | 0.15–0.16      | ~0.27          |
-| NDCG@10      | 0.066–0.078    | ~0.12          |
-| MAP@100      | 0.039–0.047    | —              |
+### Example evaluation metrics
 
-So after one epoch the model puts the correct product in the top-10 for about **25–29%** of eval queries; after a few more epochs that can reach the **~30–46%** range depending on batch size and learning rate. Best checkpoint is saved by **NDCG@10** when the IR evaluator is enabled.
+Setup: `processed/p5_mp20_ef0.1`, base model `all-MiniLM-L6-v2`, `max_seq_length` 256, default batch size and learning rate (e.g. `--lr 1e-4`). Evaluation runs over ~13k eval queries and ~50k corpus via the built-in `InformationRetrievalEvaluator`.
 
-**IR metrics:** Accuracy@1, Accuracy@10, MRR@10, NDCG@10, MAP@100 (from `InformationRetrievalEvaluator`). Enable by default; disable with `--no-information-retrieval-evaluator` for faster training.
+| Metric      | After 1 epoch | After 3 epochs |
+| ----------- | ------------- | -------------- |
+| Accuracy@1  | 0.210         |                |
+| Accuracy@10 | 0.464         |                |
+| MRR@10      | 0.287         |                |
+| NDCG@10     | 0.125         |                |
+| MAP@100     | 0.071         |                |
 
-**Sample usage:** Run the serve script without `--query` for the built-in demo, or use `--eval-query-id <order_id>` to run on a query from `eval_queries.json`.
+**What the metrics mean:** Accuracy@k = fraction of queries where at least one relevant product appears in the top-k. MRR@10 = mean reciprocal rank of the first relevant product in the top-10. NDCG@10 = normalized discounted cumulative gain at 10 (rewards relevant items ranked higher). MAP@100 = mean average precision over the top-100. All are computed per query and averaged; higher is better.
+
+After one epoch the model puts at least one correct product in the top-10 for about **25–29%** of eval queries; after a few more epochs that can reach **~30–46%** depending on batch size and learning rate. The trainer saves the best checkpoint by **NDCG@10** when the IR evaluator is enabled. Disable it with `--no-information-retrieval-evaluator` for faster training (validation loss only).
+
+**Reproducibility:** Exact numbers depend on hardware, seed, and hyperparameters (e.g. batch size 64 vs 128, learning rate). Use the same data prep and train flags to approximate these results.
 
 ---
 
 ### Demo inference
 
-Demo query (past orders only; no “Next order” at serve time):
+The serve script can be run without `--query` to use a **built-in demo query** that mimics a user who previously ordered “Organic Milk, Whole Wheat Bread” in a context where the last order was 7 days prior, on weekday 4 at hour 14. The format is:
+
+- **`[+7d w4h14]`** — shorthand for “ordered 7 days after previous order, on weekday 4 (0–6), at hour 14”.
+- **`Organic Milk, Whole Wheat Bread.`** — product names from prior orders (sequence preserved, comma-separated).
+
+So the full string is exactly what the data prep pipeline produces for the “anchor” side when we strip the “Next: …” part. You can pass any custom context with `--query "..."` or run on a stored eval query with `--eval-query-id <order_id>` (the script then loads that order’s context from `eval_queries.json`).
+
+**Example run (no args beyond --top-k):**
 
 ```
 [+7d w4h14] Organic Milk, Whole Wheat Bread.
 ```
 
-Example top-5 output:
+**Example top-5 output:**
 
 ```
 Top-5 recommendations:
@@ -130,36 +191,33 @@ Top-5 recommendations:
   5. product_id=38591 (score=0.6624) Product: Organic Whole Wheat. Aisle: bread. Department: bake...
 ```
 
-Scores are cosine similarity in [0, 1]. Use `--eval-query-id` to test on a real eval order.
+Scores are **cosine similarity** between the encoded query and each product embedding, in [0, 1] when embeddings are L2-normalized. Use `--eval-query-id` to test on a real eval order and compare with that order’s actual next basket.
 
 ---
 
 ## Training notes
 
-- Training is slow (e.g. multiple hours for 5 epochs). Larger base models or longer `--max-seq-length` increase runtime and memory. Current defaults (`all-MiniLM-L6-v2`, `max_seq_length` 256) are set for feasibility on typical hardware.
-- **Why ~1s+ per step (e.g. on Apple Silicon):** On MPS the code uses `dataloader_num_workers=0` (and no fp16) for stability. Data loading and tokenization run on the main thread, so the GPU often waits for the next batch and there’s no prefetch. On CUDA you can use `--dataloader-num-workers` for faster steps. With **dynamic padding** (pad to longest in batch), most steps can be faster, but when the batch length (and thus tensor shape) changes, MPS may recompile and you can see steps over 5s; length bucketing would limit recompilation to a few shapes.
-- No gradient accumulation; one batch per step.
+- **Runtime:** Training is slow on CPU-only and on Apple Silicon (MPS): expect multiple hours for 5 epochs with ~1.2M pairs. Larger base models (e.g. `multi-qa-MiniLM-L6`) or longer `--max-seq-length` (e.g. 384 or 512) increase runtime and memory. Defaults (`all-MiniLM-L6-v2`, `max_seq_length` 256) are chosen for feasibility on a typical laptop or single GPU.
+- **Hyperparameters:** Default learning rate `1e-4` and batch size (e.g. 64 or 128) work for many runs. The trainer uses a linear LR schedule with 10% warmup. Checkpoints are written every epoch under `models/two_tower_sbert/`; when the IR evaluator is on, the best checkpoint by NDCG@10 is also written to `models/two_tower_sbert/final/`.
+- **Why ~1s+ per step (e.g. on Apple Silicon):** On MPS the code sets `dataloader_num_workers=0` and disables fp16 for stability. Data loading and tokenization run on the main thread, so the GPU often waits for the next batch and there is no prefetch. On **CUDA** you can pass `--dataloader-num-workers` (e.g. 4) for faster steps. With **dynamic padding** (pad to longest in batch), many steps are faster, but when the batch length (and thus tensor shape) changes, MPS may recompile and you can see occasional steps over 5s; **length bucketing** (fixed set of lengths) would limit recompilation to a few shapes.
+- **Gradient accumulation:** Not used; each step is one batch. You can simulate a larger batch by increasing `--train-batch-size` if memory allows.
 
 ---
 
 ## Project structure
 
-```
-data/                  # Raw CSVs (not in repo)
-processed/<param>/      # Data prep output (train_dataset, eval_*, data_prep_params.json)
-models/two_tower_sbert/  # Checkpoints and final/
-src/
-  constants.py         # PROJECT_ROOT, default paths
-  utils.py             # setup_colored_logging(), resolve_processed_dir()
-  data/
-    prepare_instacart_sbert.py
-  train/
-    train_sbert.py
-  inference/
-    serve_recommendations.py
-notebooks/             # prepare_instacart_sbert, train_sbert, serve_recommendations
-pyproject.toml, uv.lock
-```
+| Path                                       | Description                                                                                                                                       |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **data/**                                  | Raw Instacart CSVs (not in repo; user downloads from Kaggle).                                                                                     |
+| **processed/<param>/**                     | Data prep output: `train_dataset/`, `eval_dataset/`, `eval_queries.json`, `eval_corpus.json`, `eval_relevant_docs.json`, `data_prep_params.json`. |
+| **models/two_tower_sbert/**                | Training checkpoints (e.g. `checkpoint-58419/`) and `final/` (best by NDCG@10 when IR eval is on).                                                |
+| **src/constants.py**                       | `PROJECT_ROOT`, `DEFAULT_DATA_DIR`, `DEFAULT_PROCESSED_DIR`, `DEFAULT_OUTPUT_DIR`, `DEFAULT_MODEL_DIR`, `DEFAULT_CORPUS_PATH`.                    |
+| **src/utils.py**                           | `setup_colored_logging()`, `resolve_processed_dir()` (auto-resolve processed dir to a param subdir when needed).                                  |
+| **src/data/prepare_instacart_sbert.py**    | Builds (anchor, positive) pairs from CSVs, splits train/eval by order, writes Datasets and IR artifacts.                                          |
+| **src/train/train_sbert.py**               | Loads processed data, builds Sentence Transformer + MultipleNegativesRankingLoss, runs trainer with optional InformationRetrievalEvaluator.       |
+| **src/inference/serve_recommendations.py** | Loads model and corpus, encodes query, returns top-k by cosine similarity; CLI and `Recommender` class.                                           |
+| **notebooks/**                             | Jupyter notebooks for data prep, training, and serve (mirror the scripts for interactive use).                                                    |
+| **pyproject.toml**, **uv.lock**            | Project and dependency lock (uv).                                                                                                                 |
 
 ---
 

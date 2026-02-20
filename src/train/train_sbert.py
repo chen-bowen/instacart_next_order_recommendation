@@ -140,6 +140,7 @@ def train_two_tower_sbert(
     num_train_epochs: int = 3,
     train_batch_size: int = 32,
     eval_batch_size: int = 32,
+    gradient_accumulation_steps: int = 1,
     learning_rate: float = 1e-4,
     loss_scale: float | None = 30.0,
     dataloader_num_workers: int = 4,
@@ -187,11 +188,16 @@ def train_two_tower_sbert(
     num_workers = 0 if use_mps else dataloader_num_workers
     pin_memory = False if use_mps else True
     use_fp16 = not use_mps  # MPS + fp16 often leads to nan in contrastive loss (softmax/log)
+    # Gradient checkpointing reduces peak memory (recomputes activations in backward) at the cost of ~20% slower training.
+    use_gradient_checkpointing = use_mps
     if use_mps:
-        logger.info("  -> MPS detected: dataloader_num_workers=0, pin_memory=False, fp16=False (stability on Apple Silicon)")
+        logger.info(
+            "  -> MPS detected: dataloader_num_workers=0, pin_memory=False, fp16=False, gradient_checkpointing=True (stability + memory on Apple Silicon)"
+        )
 
     num_devices = max(1, torch.cuda.device_count()) if torch.cuda.is_available() else 1
-    steps_per_epoch = math.ceil(len(train_dataset) / (train_batch_size * num_devices))
+    effective_batch = train_batch_size * gradient_accumulation_steps * num_devices
+    steps_per_epoch = math.ceil(len(train_dataset) / effective_batch)
     total_steps = num_train_epochs * steps_per_epoch
     warmup_steps = int(0.1 * total_steps)  # 10% warmup (equivalent to previous warmup_ratio=0.1)
 
@@ -205,6 +211,8 @@ def train_two_tower_sbert(
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=train_batch_size,
         per_device_eval_batch_size=eval_batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        gradient_checkpointing=use_gradient_checkpointing,
         learning_rate=learning_rate,
         warmup_steps=warmup_steps,
         lr_scheduler_type="cosine",  # Use cosine decay instead of linear (gentler, helps avoid plateaus)
@@ -240,7 +248,7 @@ def train_two_tower_sbert(
     logger.info("  model_name: %s", model_name)
     logger.info("  max_seq_length: %s", max_seq_length)
     logger.info("  num_train_epochs: %d", num_train_epochs)
-    logger.info("  train_batch_size: %d", train_batch_size)
+    logger.info("  train_batch_size: %d (effective: %d with grad_accum=%d)", train_batch_size, effective_batch, gradient_accumulation_steps)
     logger.info("  eval_batch_size: %d", eval_batch_size)
     logger.info("  learning_rate: %g", learning_rate)
     logger.info("  loss_scale: %s", loss_scale)
@@ -297,7 +305,18 @@ def main() -> None:
         help="Maximum sequence length for inputs (user context + product text). Default 256 for faster training with max_prior_orders=5, max_product_names=30.",
     )
     parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
-    parser.add_argument("--train-batch-size", type=int, default=64, help="Per-device train batch size (64 or 128 recommended)")
+    parser.add_argument(
+        "--train-batch-size",
+        type=int,
+        default=64,
+        help="Per-device train batch size. On MPS (Apple Silicon) use 16–32 to avoid OOM; combine with --gradient-accumulation-steps for effective batch size.",
+    )
+    parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=1,
+        help="Accumulate gradients this many steps before update. Use with smaller --train-batch-size to reduce peak memory (e.g. batch 16 + steps 4 = effective 64).",
+    )
     parser.add_argument("--eval-batch-size", type=int, default=64, help="Per-device eval batch size")
     parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
     parser.add_argument(
@@ -333,6 +352,7 @@ def main() -> None:
         num_train_epochs=args.epochs,
         train_batch_size=args.train_batch_size,
         eval_batch_size=args.eval_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.lr,
         loss_scale=args.loss_scale,
         dataloader_num_workers=args.dataloader_num_workers,
