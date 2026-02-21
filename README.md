@@ -102,9 +102,9 @@ Loads the processed dir (auto-resolves to a single param subdir under `processed
 
 ### 3. Serve
 
-Loads the trained model from `final/` (or a checkpoint dir) and the product corpus from a JSON file. Encodes the corpus once at startup; for each query (user context string), encodes the query and returns the **top-k** product IDs by cosine similarity. Can be used from the CLI or via the Python API (`Recommender`, `recommend()`).
+Loads the trained model from `final/` (or a checkpoint dir) and the product corpus from a JSON file. Product embeddings are **cached on disk** (under `<corpus_parent>/.embedding_index/`) so later runs reuse them instead of recomputing; the cache is invalidated when the corpus file or model changes. For each query (user context string), the model encodes the query and returns the **top-k** product IDs by cosine similarity. Can be used from the CLI or via the Python API (`Recommender`, `recommend()`).
 
-**Key flags:** `--model-dir`, `--corpus`, `--query` (raw context string), `--eval-query-id` (use a query from `eval_queries.json` by order_id), `--top-k`.
+**Key flags:** `--model-dir`, `--corpus`, `--query` (raw context string), `--eval-query-id` (use a query from `eval_queries.json` by order_id), `--top-k`, `--no-index` (disable load/save of product embedding cache).
 
 ### Commands (copy-paste)
 

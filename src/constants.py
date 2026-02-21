@@ -17,3 +17,9 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "models" / "two_tower_sbert"
 # Serve: trained model and product corpus (corpus may be in a param subdir, e.g. processed/p5_mp20_ef0.1/)
 DEFAULT_MODEL_DIR = PROJECT_ROOT / "models" / "two_tower_sbert" / "final"
 DEFAULT_CORPUS_PATH = PROJECT_ROOT / "processed" / "eval_corpus.json"
+
+# Embedding index cache (under corpus parent dir)
+INDEX_SUBDIR = ".embedding_index"
+MANIFEST_FILENAME = "manifest.json"
+EMBEDDINGS_FILENAME = "embeddings.npy"
+PRODUCT_IDS_FILENAME = "product_ids.json"

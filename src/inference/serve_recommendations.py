@@ -16,20 +16,95 @@ Usage:
 from __future__ import annotations
 
 import argparse  # Parse CLI flags like --query, --top-k
+import hashlib
 import json  # Load eval_corpus.json and eval_queries.json
 import logging  # Log model/corpus load
 from pathlib import Path  # Path handling for model/corpus dirs
 
+import numpy as np
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer  # Load trained model and encode text
 from sentence_transformers.util import cos_sim  # Compute cosine similarity between query and product embeddings
 
-from src.constants import DEFAULT_CORPUS_PATH, DEFAULT_MODEL_DIR, PROJECT_ROOT
+from src.constants import (
+    DEFAULT_CORPUS_PATH,
+    DEFAULT_MODEL_DIR,
+    EMBEDDINGS_FILENAME,
+    INDEX_SUBDIR,
+    MANIFEST_FILENAME,
+    PRODUCT_IDS_FILENAME,
+    PROJECT_ROOT,
+)
 
 logger = logging.getLogger(__name__)  # Module-level logger
 
 # Load .env from project root so HF_TOKEN is set before loading models from Hub
 load_dotenv(PROJECT_ROOT / ".env")
+
+
+def _index_dir(corpus_path: Path, model_dir: Path) -> Path:
+    """Directory for cached embeddings; one cache per (model_dir, corpus_path) pair."""
+    canonical = f"{model_dir.resolve()!s}|{corpus_path.resolve()!s}"
+    name = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+    return Path(corpus_path).parent / INDEX_SUBDIR / name
+
+
+def _load_index(index_dir: Path, corpus_path: Path, model_dir: Path) -> tuple[np.ndarray, list[str]] | None:
+    """
+    Load cached product embeddings if manifest matches current corpus and model.
+    Returns (embeddings, product_ids) or None if cache miss or invalid.
+    """
+    manifest_path = index_dir / MANIFEST_FILENAME
+    if not manifest_path.exists():
+        return None
+    try:
+        with open(manifest_path, "r") as f:
+            meta = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    corpus_resolved = str(Path(corpus_path).resolve())
+    model_resolved = str(Path(model_dir).resolve())
+    try:
+        if meta.get("corpus_path") != corpus_resolved or meta.get("model_dir") != model_resolved:
+            return None
+        if meta.get("corpus_mtime") != Path(corpus_path).stat().st_mtime:
+            return None
+    except OSError:
+        return None
+    emb_path = index_dir / EMBEDDINGS_FILENAME
+    ids_path = index_dir / PRODUCT_IDS_FILENAME
+    if not emb_path.exists() or not ids_path.exists():
+        return None
+    try:
+        embeddings = np.load(emb_path)
+        with open(ids_path, "r") as f:
+            product_ids = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if len(product_ids) != len(embeddings):
+        return None
+    return embeddings, product_ids
+
+
+def _save_index(index_dir: Path, corpus_path: Path, model_dir: Path, product_ids: list[str], embeddings: np.ndarray) -> None:
+    """Write manifest, embeddings, and product_ids so they can be loaded later."""
+    index_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        mtime = Path(corpus_path).stat().st_mtime
+    except OSError:
+        mtime = 0
+    manifest = {
+        "corpus_path": str(Path(corpus_path).resolve()),
+        "model_dir": str(Path(model_dir).resolve()),
+        "corpus_mtime": mtime,
+        "n_products": len(product_ids),
+    }
+    with open(index_dir / MANIFEST_FILENAME, "w") as f:
+        json.dump(manifest, f, indent=2)
+    np.save(index_dir / EMBEDDINGS_FILENAME, embeddings.astype(np.float32))
+    with open(index_dir / PRODUCT_IDS_FILENAME, "w") as f:
+        json.dump(product_ids, f)
+    logger.info("Saved embedding index to %s (%d products)", index_dir, len(product_ids))
 
 
 def load_corpus(corpus_path: Path) -> tuple[list[str], list[str]]:
@@ -50,6 +125,7 @@ def load_corpus(corpus_path: Path) -> tuple[list[str], list[str]]:
 class Recommender:
     """
     Two-tower recommender: encodes user context and products, returns top-k by cosine similarity.
+    Product embeddings are cached on disk (by corpus + model) so they are not recomputed every startup.
     """
 
     def __init__(
@@ -57,25 +133,43 @@ class Recommender:
         model_dir: Path,
         corpus_path: Path,
         batch_size: int = 64,
+        use_index: bool = True,
     ):
         self.model_dir = Path(model_dir)
         self.corpus_path = Path(corpus_path)
-        self.model = SentenceTransformer(str(self.model_dir))  # Load trained two-tower encoder
         self.product_ids, self.product_texts = load_corpus(self.corpus_path)  # Parallel lists
         self.pid_to_text = dict(zip(self.product_ids, self.product_texts))  # O(1) lookup for printing
-        # Precompute embeddings for all products (done once at startup)
-        self.product_embeddings = self.model.encode(
-            self.product_texts,
-            batch_size=batch_size,  # Encode in batches to control memory
-            show_progress_bar=True,
-            normalize_embeddings=True,  # L2-normalize for cosine similarity via dot product
-        )
-        logger.info(
-            "Loaded model from %s, corpus %d products from %s",
-            model_dir,
-            len(self.product_ids),
-            corpus_path,
-        )
+
+        self.model = SentenceTransformer(str(self.model_dir))  # Always needed to encode queries
+        index_dir = _index_dir(self.corpus_path, self.model_dir)
+        cached = _load_index(index_dir, self.corpus_path, self.model_dir) if use_index else None
+        if cached is not None:
+            embeddings, ids = cached
+            if ids == self.product_ids:
+                self.product_embeddings = embeddings
+                logger.info(
+                    "Loaded model from %s, corpus %d products from %s (product embeddings from index)",
+                    model_dir,
+                    len(self.product_ids),
+                    corpus_path,
+                )
+            else:
+                cached = None
+        if cached is None:
+            self.product_embeddings = self.model.encode(
+                self.product_texts,
+                batch_size=batch_size,
+                show_progress_bar=True,
+                normalize_embeddings=True,
+            )
+            if use_index:
+                _save_index(index_dir, self.corpus_path, self.model_dir, self.product_ids, self.product_embeddings)
+            logger.info(
+                "Loaded model from %s, corpus %d products from %s",
+                model_dir,
+                len(self.product_ids),
+                corpus_path,
+            )
 
     def recommend(
         self,
@@ -123,9 +217,15 @@ def load_recommender(
     model_dir: Path = DEFAULT_MODEL_DIR,
     corpus_path: Path = DEFAULT_CORPUS_PATH,
     batch_size: int = 64,
+    use_index: bool = True,
 ) -> Recommender:
     """Load model and corpus, return a Recommender instance (for repeated recommend() calls)."""
-    return Recommender(model_dir=model_dir, corpus_path=corpus_path, batch_size=batch_size)
+    return Recommender(
+        model_dir=model_dir,
+        corpus_path=corpus_path,
+        batch_size=batch_size,
+        use_index=use_index,
+    )
 
 
 def recommend(
@@ -147,6 +247,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Serve product recommendations")
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR, help="Path to trained model")
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS_PATH, help="Path to eval_corpus.json")
+    parser.add_argument(
+        "--no-index",
+        action="store_true",
+        help="Disable loading/saving product embedding index (recompute embeddings every time)",
+    )
     parser.add_argument("--query", type=str, default=None, help="User context string for recommendations")
     parser.add_argument("--eval-query-id", type=str, default=None, help="Use query from eval_queries.json by ID")
     parser.add_argument("--top-k", type=int, default=10, help="Number of recommendations to return")
@@ -154,8 +259,12 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")  # Simple log format
 
-    # Load model and precompute product embeddings (slow on first run)
-    rec = load_recommender(model_dir=args.model_dir, corpus_path=args.corpus)
+    # Load model and product embeddings (from index if available, else compute and cache)
+    rec = load_recommender(
+        model_dir=args.model_dir,
+        corpus_path=args.corpus,
+        use_index=not args.no_index,
+    )
 
     # Resolve query: --eval-query-id > --query > demo
     if args.eval_query_id:

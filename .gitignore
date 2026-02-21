@@ -16,6 +16,7 @@ build/
 /data/
 /processed/
 /models/
+.embedding_index/
 *.csv
 
 # Jupyter
