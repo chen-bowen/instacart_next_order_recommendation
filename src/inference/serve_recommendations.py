@@ -1,6 +1,11 @@
 """
 Serve product recommendations using the trained two-tower SBERT model.
 
+Inference is embedding-based (no text generation):
+  - We encode the user context string and each product's text with the same SentenceTransformer.
+  - Recommendations are the top-k products by cosine similarity between query and product embeddings.
+  - One shared encoder is used for both "towers" (query and document); there is no model.generate().
+
 Usage:
   # Run inference: python -m src.inference
   python -m src.inference --model-dir models/two_tower_sbert/final --corpus processed/p5_mp20_ef0.1/eval_corpus.json

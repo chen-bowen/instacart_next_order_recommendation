@@ -149,17 +149,18 @@ Train/eval are split **by order** so that all pairs from a given order are in on
 
 Setup: `processed/p5_mp20_ef0.1`, base model `all-MiniLM-L6-v2`, `max_seq_length` 256, default batch size and learning rate (e.g. `--lr 1e-4`). Evaluation runs over ~13k eval queries and ~50k corpus via the built-in `InformationRetrievalEvaluator`.
 
-| Metric      | After 1 epoch | After 3 epochs |
-| ----------- | ------------- | -------------- |
-| Accuracy@1  | 0.210         |                |
-| Accuracy@10 | 0.464         |                |
-| MRR@10      | 0.287         |                |
-| NDCG@10     | 0.125         |                |
-| MAP@100     | 0.071         |                |
+| Metric      | After 1 epoch | After 2 epochs | After 3 epochs | After 4 epochs |
+| ----------- | ------------- | -------------- | -------------- | -------------- |
+| Accuracy@1  | 0.210         | 0.226          | 0.239          | 0.239          |
+| Accuracy@10 | 0.464         | 0.507          | 0.532          | 0.540          |
+| Recall@10   | 0.103         | 0.116          | 0.125          | 0.129          |
+| MRR@10      | 0.287         | 0.311          | 0.329          | 0.331          |
+| NDCG@10     | 0.125         | 0.139          | 0.150          | 0.153          |
+| MAP@100     | 0.071         | 0.078          | 0.085          | 0.086          |
 
-**What the metrics mean:** Accuracy@k = fraction of queries where at least one relevant product appears in the top-k. MRR@10 = mean reciprocal rank of the first relevant product in the top-10. NDCG@10 = normalized discounted cumulative gain at 10 (rewards relevant items ranked higher). MAP@100 = mean average precision over the top-100. All are computed per query and averaged; higher is better.
+**What the metrics mean:** Accuracy@k = fraction of queries where at least one relevant product appears in the top-k. Recall@10 = fraction of relevant products found in the top-10 (averaged per query). MRR@10 = mean reciprocal rank of the first relevant product in the top-10. NDCG@10 = normalized discounted cumulative gain at 10 (rewards relevant items ranked higher). MAP@100 = mean average precision over the top-100. All are computed per query and averaged; higher is better.
 
-After one epoch the model puts at least one correct product in the top-10 for about **25–29%** of eval queries; after a few more epochs that can reach **~30–46%** depending on batch size and learning rate. The trainer saves the best checkpoint by **NDCG@10** when the IR evaluator is enabled. Disable it with `--no-information-retrieval-evaluator` for faster training (validation loss only).
+After one epoch the model puts at least one correct product in the top-10 for about **46%** of eval queries; after four epochs this reaches **~54%** (Accuracy@10). The trainer saves the best checkpoint by **NDCG@10** when the IR evaluator is enabled. Disable it with `--no-information-retrieval-evaluator` for faster training (validation loss only).
 
 **Reproducibility:** Exact numbers depend on hardware, seed, and hyperparameters (e.g. batch size 64 vs 128, learning rate). Use the same data prep and train flags to approximate these results.
 
