@@ -49,8 +49,8 @@ Or with pip: `pip install -e .` (see `pyproject.toml` for dependencies). 3. **Do
 - `aisles.csv`
 - `departments.csv`
 
-4. **Optional:** Create a `.env` file in the project root with `HF_TOKEN=...` if you use private Hugging Face models or datasets.
-5. **Verify:** Run data prep (see Pipeline below); it will fail with a clear error if any CSV is missing or misnamed.
+1. **Optional:** Create a `.env` file in the project root with `HF_TOKEN=...` if you use private Hugging Face models or datasets.
+2. **Verify:** Run data prep (see Pipeline below); it will fail with a clear error if any CSV is missing or misnamed.
 
 ---
 
@@ -99,11 +99,11 @@ Loads the processed dir (auto-resolves to a single param subdir under `processed
 
 ### 3. Serve
 
-Loads the trained model from `final/` (or a checkpoint dir) and the product corpus from a JSON file. Product embeddings are **cached on disk** (under `<corpus_parent>/.embedding_index/`) so later runs reuse them instead of recomputing; the cache is invalidated when the corpus file or model changes. For each query (user context string), the model encodes the query and returns the **top-k** product IDs by cosine similarity. Can be used from the CLI or via the Python API (`Recommender`, `recommend()`).
+Loads the trained model from `final/` (or a checkpoint dir) and the product corpus from a JSON file. **Inference is embedding-based** (no text generation): the same SentenceTransformer encodes the user context and each product; recommendations are the **top-k** products by cosine similarity between query and product embeddings. Product embeddings are **cached on disk** (under `<corpus_parent>/.embedding_index/`) so later runs reuse them; use `--no-index` to disable. Within the same process, repeated `load_recommender()` with the same model and corpus returns the same instance (session cache), so the index is not reloaded. Run via CLI (`python -m src.inference`) or the Python API (`load_recommender()`, `Recommender`, `recommend()`).
 
 **Key flags:** `--model-dir`, `--corpus`, `--query` (raw context string), `--eval-query-id` (use a query from `eval_queries.json` by order_id), `--top-k`, `--no-index` (disable load/save of product embedding cache).
 
-### Commands (copy-paste)
+### Commands
 
 ```bash
 # 1. Prepare (writes to processed/p5_mp20_ef0.1/ with defaults)
@@ -124,7 +124,7 @@ uv run python -m src.inference --corpus processed/p5_mp20_ef0.1/eval_corpus.json
 
 ---
 
-## Prediction problem (summary)
+## Prediction problem
 
 - **Task:** Rank the catalog so products in the user’s _next_ order are at the top (see **What we are predicting** above).
 - **Input:** User context from _prior_ orders only: a single text string built from the last N prior orders (product names in sequence, optional timing like “ordered 7 days after previous on weekday 4 at hour 14”). No information from the “next” order is included at prediction time.
@@ -234,18 +234,18 @@ You can also pass any custom context with `--query "..."`. Scores are **cosine s
 
 ## Project structure
 
-| Path                                       | Description                                                                                                                                       |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **data/**                                  | Raw Instacart CSVs (not in repo; user downloads from Kaggle).                                                                                     |
-| **processed/\*\***/\*\*                    | Data prep output: `train_dataset/`, `eval_dataset/`, `eval_queries.json`, `eval_corpus.json`, `eval_relevant_docs.json`, `data_prep_params.json`. |
-| **models/two_tower_sbert/**                | Training checkpoints (e.g. `checkpoint-58419/`) and `final/` (best by NDCG@10 when IR eval is on).                                                |
-| **src/constants.py**                       | `PROJECT_ROOT`, `DEFAULT_DATA_DIR`, `DEFAULT_PROCESSED_DIR`, `DEFAULT_OUTPUT_DIR`, `DEFAULT_MODEL_DIR`, `DEFAULT_CORPUS_PATH`.                    |
-| **src/utils.py**                           | `setup_colored_logging()`, `resolve_processed_dir()` (auto-resolve processed dir to a param subdir when needed).                                  |
-| **src/data/prepare_instacart_sbert.py**    | Builds (anchor, positive) pairs from CSVs, splits train/eval by order, writes Datasets and IR artifacts.                                          |
-| **src/train/train_sbert.py**               | Loads processed data, builds Sentence Transformer + MultipleNegativesRankingLoss, runs trainer with optional InformationRetrievalEvaluator.       |
-| **src/inference/serve_recommendations.py** | Loads model and corpus, encodes query, returns top-k by cosine similarity; CLI and `Recommender` class.                                           |
-| **notebooks/**                             | Jupyter notebooks for data prep, training, and serve (mirror the scripts for interactive use).                                                    |
-| **pyproject.toml**, **uv.lock**            | Project and dependency lock (uv).                                                                                                                 |
+| Path                                       | Description                                                                                                                                                                                                                                       |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **data/**                                  | Raw Instacart CSVs (not in repo; user downloads from Kaggle).                                                                                                                                                                                     |
+| **processed/** (param subdirs)             | Data prep output: `train_dataset/`, `eval_dataset/`, `eval_queries.json`, `eval_corpus.json`, `eval_relevant_docs.json`, `data_prep_params.json`.                                                                                                 |
+| **models/two_tower_sbert/**                | Training checkpoints (e.g. `checkpoint-58419/`) and `final/` (best by NDCG@10 when IR eval is on).                                                                                                                                                |
+| **src/constants.py**                       | `PROJECT_ROOT`, `DEFAULT_DATA_DIR`, `DEFAULT_PROCESSED_DIR`, `DEFAULT_OUTPUT_DIR`, `DEFAULT_MODEL_DIR`, `DEFAULT_CORPUS_PATH`.                                                                                                                    |
+| **src/utils.py**                           | `setup_colored_logging()`, `resolve_processed_dir()` (auto-resolve processed dir to a param subdir when needed).                                                                                                                                  |
+| **src/data/prepare_instacart_sbert.py**    | Builds (anchor, positive) pairs from CSVs, splits train/eval by order, writes Datasets and IR artifacts.                                                                                                                                          |
+| **src/train/train_sbert.py**               | Loads processed data, builds Sentence Transformer + MultipleNegativesRankingLoss, runs trainer with optional InformationRetrievalEvaluator.                                                                                                       |
+| **src/inference/serve_recommendations.py** | Embedding-based serve: loads model and corpus, caches product embeddings on disk (and in-session); encodes query, returns top-k by cosine similarity. CLI via `python -m src.inference`; API: `load_recommender()`, `Recommender`, `recommend()`. |
+| **notebooks/**                             | Jupyter notebooks for data prep, training, and serve (mirror the scripts for interactive use).                                                                                                                                                    |
+| **pyproject.toml**, **uv.lock**            | Project and dependency lock (uv).                                                                                                                                                                                                                 |
 
 ---
 
