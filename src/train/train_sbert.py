@@ -28,19 +28,30 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 import torch
 
-from datasets import Dataset, load_from_disk  # Hugging Face Datasets for train/eval data
+from datasets import (
+    Dataset,
+    load_from_disk,
+)  # Hugging Face Datasets for train/eval data
 from sentence_transformers import (  # Core Sentence Transformers training primitives
     SentenceTransformer,  # bi-encoder model
     SentenceTransformerTrainer,  # high-level Trainer
     SentenceTransformerTrainingArguments,  # Trainer config wrapper
 )
 from sentence_transformers.data_collator import SentenceTransformerDataCollator
-from sentence_transformers.evaluation import InformationRetrievalEvaluator  # Information Retrieval metrics (MRR, Recall@k, etc.)
-from sentence_transformers.losses import MultipleNegativesRankingLoss  # in-batch negatives loss
-from sentence_transformers.training_args import BatchSamplers  # batch samplers (NO_DUPLICATES, etc.)
+from sentence_transformers.evaluation import (
+    InformationRetrievalEvaluator,
+)  # Information Retrieval metrics (MRR, Recall@k, etc.)
+from sentence_transformers.losses import (
+    MultipleNegativesRankingLoss,
+)  # in-batch negatives loss
+from sentence_transformers.training_args import (
+    BatchSamplers,
+)  # batch samplers (NO_DUPLICATES, etc.)
 
 
-def load_processed_data(processed_dir: Path) -> tuple[Dataset, Dataset | None, dict, dict, dict]:
+def load_processed_data(
+    processed_dir: Path,
+) -> tuple[Dataset, Dataset | None, dict, dict, dict]:
     """
     Load train/eval datasets and Information retrieval artifacts from the processed directory.
 
@@ -58,7 +69,9 @@ def load_processed_data(processed_dir: Path) -> tuple[Dataset, Dataset | None, d
     processed_dir = Path(processed_dir)  # allow string/Path interchangeably
     logger.info("[Step 1/5] Loading processed data from disk...")
 
-    processed_dir, subdir_msg = resolve_processed_dir(processed_dir, DEFAULT_PROCESSED_DIR)
+    processed_dir, subdir_msg = resolve_processed_dir(
+        processed_dir, DEFAULT_PROCESSED_DIR
+    )
     if subdir_msg:
         logger.info("%s", subdir_msg)
 
@@ -81,7 +94,9 @@ def load_processed_data(processed_dir: Path) -> tuple[Dataset, Dataset | None, d
     with open(processed_dir / "eval_relevant_docs.json", "r") as f:
         raw_relevant = json.load(f)
         # Convert JSON lists to sets for the evaluator
-        eval_relevant_docs: dict[str, set[str]] = {k: set(v) for k, v in raw_relevant.items()}
+        eval_relevant_docs: dict[str, set[str]] = {
+            k: set(v) for k, v in raw_relevant.items()
+        }
 
     logger.info(
         "  -> train: %d pairs, eval: %d pairs, queries: %d, corpus: %d",
@@ -93,7 +108,9 @@ def load_processed_data(processed_dir: Path) -> tuple[Dataset, Dataset | None, d
     return train_dataset, eval_dataset, eval_queries, eval_corpus, eval_relevant_docs
 
 
-def build_model(model_name: str, max_seq_length: int | None = None) -> SentenceTransformer:
+def build_model(
+    model_name: str, max_seq_length: int | None = None
+) -> SentenceTransformer:
     """
     Instantiate a SentenceTransformer model for the two-tower setup.
 
@@ -162,7 +179,13 @@ def train_two_tower_sbert(
         data_prep_params = None
 
     # 1. Load datasets and Information retrieval artifacts from disk
-    train_dataset, eval_dataset, eval_queries, eval_corpus, eval_relevant_docs = load_processed_data(processed_dir)
+    (
+        train_dataset,
+        eval_dataset,
+        eval_queries,
+        eval_corpus,
+        eval_relevant_docs,
+    ) = load_processed_data(processed_dir)
 
     # 2. Build SentenceTransformer model and in-batch negatives loss
     logger.info("[Step 2/5] Building model and loss...")
@@ -173,7 +196,9 @@ def train_two_tower_sbert(
     # 3. Set up Information retrieval evaluator for Recall@k / MRR / NDCG feedback (optional, can be slow)
     logger.info("[Step 3/5] Setting up evaluator and training config...")
     information_retrieval_evaluator = (
-        build_information_retrieval_evaluator(eval_queries, eval_corpus, eval_relevant_docs)
+        build_information_retrieval_evaluator(
+            eval_queries, eval_corpus, eval_relevant_docs
+        )
         if run_information_retrieval_evaluator
         else None
     )
@@ -187,7 +212,9 @@ def train_two_tower_sbert(
     use_mps = getattr(torch.backends.mps, "is_available", lambda: False)()
     num_workers = 0 if use_mps else dataloader_num_workers
     pin_memory = False if use_mps else True
-    use_fp16 = not use_mps  # MPS + fp16 often leads to nan in contrastive loss (softmax/log)
+    use_fp16 = (
+        not use_mps
+    )  # MPS + fp16 often leads to nan in contrastive loss (softmax/log)
     # Gradient checkpointing reduces peak memory (recomputes activations in backward) at the cost of ~20% slower training.
     use_gradient_checkpointing = use_mps
     if use_mps:
@@ -199,7 +226,9 @@ def train_two_tower_sbert(
     effective_batch = train_batch_size * gradient_accumulation_steps * num_devices
     steps_per_epoch = math.ceil(len(train_dataset) / effective_batch)
     total_steps = num_train_epochs * steps_per_epoch
-    warmup_steps = int(0.1 * total_steps)  # 10% warmup (equivalent to previous warmup_ratio=0.1)
+    warmup_steps = int(
+        0.1 * total_steps
+    )  # 10% warmup (equivalent to previous warmup_ratio=0.1)
 
     # When IR evaluator is on, save/load best checkpoint by NDCG@10
     ir_eval_name = "order-recommendation"
@@ -248,19 +277,31 @@ def train_two_tower_sbert(
     logger.info("  model_name: %s", model_name)
     logger.info("  max_seq_length: %s", max_seq_length)
     logger.info("  num_train_epochs: %d", num_train_epochs)
-    logger.info("  train_batch_size: %d (effective: %d with grad_accum=%d)", train_batch_size, effective_batch, gradient_accumulation_steps)
+    logger.info(
+        "  train_batch_size: %d (effective: %d with grad_accum=%d)",
+        train_batch_size,
+        effective_batch,
+        gradient_accumulation_steps,
+    )
     logger.info("  eval_batch_size: %d", eval_batch_size)
     logger.info("  learning_rate: %g", learning_rate)
     logger.info("  loss_scale: %s", loss_scale)
     logger.info("  dataloader_num_workers: %d", dataloader_num_workers)
     logger.info("  dataloader_drop_last: True (fixed batch size for MPS)")
-    logger.info("  run_information_retrieval_evaluator: %s", run_information_retrieval_evaluator)
+    logger.info(
+        "  run_information_retrieval_evaluator: %s", run_information_retrieval_evaluator
+    )
     logger.info("=" * 60)
 
     # Dynamic padding: pad to longest in batch. Transformer module already truncates to max_seq_length.
     # Batch shape will vary (may trigger MPS recompilation on shape change).
     trainer = SentenceTransformerTrainer(
-        model=model, args=args, train_dataset=train_dataset, eval_dataset=eval_dataset, loss=loss, evaluator=information_retrieval_evaluator
+        model=model,
+        args=args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        loss=loss,
+        evaluator=information_retrieval_evaluator,
     )
 
     # Run the full training loop
@@ -279,7 +320,9 @@ def main() -> None:
     """
     CLI entrypoint: parse arguments, call train_two_tower_sbert, and exit.
     """
-    parser = argparse.ArgumentParser(description="Train two-tower SBERT model on Instacart data")
+    parser = argparse.ArgumentParser(
+        description="Train two-tower SBERT model on Instacart data"
+    )
     parser.add_argument(
         "--processed-dir",
         type=Path,
@@ -304,7 +347,9 @@ def main() -> None:
         default=256,
         help="Maximum sequence length for inputs (user context + product text). Default 256 for faster training with max_prior_orders=5, max_product_names=30.",
     )
-    parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
+    parser.add_argument(
+        "--epochs", type=int, default=5, help="Number of training epochs"
+    )
     parser.add_argument(
         "--train-batch-size",
         type=int,
@@ -317,7 +362,9 @@ def main() -> None:
         default=1,
         help="Accumulate gradients this many steps before update. Use with smaller --train-batch-size to reduce peak memory (e.g. batch 16 + steps 4 = effective 64).",
     )
-    parser.add_argument("--eval-batch-size", type=int, default=64, help="Per-device eval batch size")
+    parser.add_argument(
+        "--eval-batch-size", type=int, default=64, help="Per-device eval batch size"
+    )
     parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
     parser.add_argument(
         "--loss-scale",
@@ -341,7 +388,13 @@ def main() -> None:
     args = parser.parse_args()
 
     setup_colored_logging(
-        quiet_loggers=["httpx", "httpcore", "huggingface_hub", "urllib3", "sentence_transformers"],
+        quiet_loggers=[
+            "httpx",
+            "httpcore",
+            "huggingface_hub",
+            "urllib3",
+            "sentence_transformers",
+        ],
     )
 
     train_two_tower_sbert(

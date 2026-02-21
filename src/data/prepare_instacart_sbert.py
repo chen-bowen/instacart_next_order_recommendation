@@ -27,7 +27,9 @@ from src.utils import setup_colored_logging
 CHUNK_SIZE = 500_000  # for reading order_products__prior.csv
 
 
-def load_product_text_map(products_path: Path, aisles_path: Path, departments_path: Path) -> dict[int, str]:
+def load_product_text_map(
+    products_path: Path, aisles_path: Path, departments_path: Path
+) -> dict[int, str]:
     """
     Build a mapping from product_id to a single text string for the item tower.
 
@@ -49,7 +51,9 @@ def load_product_text_map(products_path: Path, aisles_path: Path, departments_pa
     departments = pd.read_csv(departments_path)
 
     # Join products with aisle and department so each row has name, aisle name, department name.
-    products = products.merge(aisles, on="aisle_id").merge(departments, on="department_id")
+    products = products.merge(aisles, on="aisle_id").merge(
+        departments, on="department_id"
+    )
     # Build one string per product: "Product: X. Aisle: Y. Department: Z."
     products["text"] = (
         "Product: "
@@ -81,15 +85,31 @@ def load_orders(orders_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     orders = pd.read_csv(orders_path)
     # Normalize hour column to 2-digit string if it was read as object (e.g. "08").
     if orders["order_hour_of_day"].dtype == object:
-        orders["order_hour_of_day"] = orders["order_hour_of_day"].astype(str).str.zfill(2)
+        orders["order_hour_of_day"] = (
+            orders["order_hour_of_day"].astype(str).str.zfill(2)
+        )
     # Rows where we have a "next order" to predict; keep columns needed for context and split.
     target_orders = orders[orders["eval_set"] == "train"][
-        ["order_id", "user_id", "order_number", "order_dow", "order_hour_of_day", "days_since_prior_order"]
+        [
+            "order_id",
+            "user_id",
+            "order_number",
+            "order_dow",
+            "order_hour_of_day",
+            "days_since_prior_order",
+        ]
     ].copy()
     # Rows that are historical orders (used only to build user context).
     # Keep dow / hour / days_since_prior_order so temporal patterns between orders are available.
     history_orders = orders[orders["eval_set"] == "prior"][
-        ["order_id", "user_id", "order_number", "order_dow", "order_hour_of_day", "days_since_prior_order"]
+        [
+            "order_id",
+            "user_id",
+            "order_number",
+            "order_dow",
+            "order_hour_of_day",
+            "days_since_prior_order",
+        ]
     ].copy()
     return target_orders, history_orders
 
@@ -121,7 +141,9 @@ def build_order_to_products(
         # Keep only rows for orders we care about.
         chunk = chunk[chunk["order_id"].isin(history_order_ids)]
         # Append each (order_id, product_id) to the list for that order.
-        for order_id, product_id in chunk[["order_id", "product_id"]].itertuples(index=False):
+        for order_id, product_id in chunk[["order_id", "product_id"]].itertuples(
+            index=False
+        ):
             order_to_products[order_id].append(product_id)
     return dict(order_to_products)
 
@@ -161,7 +183,8 @@ def build_user_context_for_target_orders(
         order_id = int(row["order_id"])
         # Get the history orders for the user that happened before the target order.
         user_history = history_orders[
-            (history_orders["user_id"] == row["user_id"]) & (history_orders["order_number"] < row["order_number"])
+            (history_orders["user_id"] == row["user_id"])
+            & (history_orders["order_number"] < row["order_number"])
         ].tail(max_prior_orders)
 
         segments: list[str] = []
@@ -186,7 +209,11 @@ def build_user_context_for_target_orders(
                 continue
 
             dow = int(h["order_dow"])
-            hour = h["order_hour_of_day"] if isinstance(h["order_hour_of_day"], str) else str(int(h["order_hour_of_day"]))
+            hour = (
+                h["order_hour_of_day"]
+                if isinstance(h["order_hour_of_day"], str)
+                else str(int(h["order_hour_of_day"]))
+            )
             # Compact time prefix: w=weekday 0-6, h=hour; +Nd = N days after previous
             if pd.isna(h["days_since_prior_order"]):
                 time_prefix = f"w{dow}h{hour}"
@@ -199,7 +226,11 @@ def build_user_context_for_target_orders(
 
         products_str = "; ".join(segments) if segments else "(no prior orders)"
         row_dow = int(row["order_dow"])
-        row_hour = row["order_hour_of_day"] if isinstance(row["order_hour_of_day"], str) else str(int(row["order_hour_of_day"]))
+        row_hour = (
+            row["order_hour_of_day"]
+            if isinstance(row["order_hour_of_day"], str)
+            else str(int(row["order_hour_of_day"]))
+        )
         if pd.isna(row["days_since_prior_order"]):
             next_clause = f"Next: w{row_dow}h{row_hour}"
         else:
@@ -338,7 +369,9 @@ def run(
     order_products_train_path = data_dir / "order_products__train.csv"
 
     # Step 1: product_id -> product text (for item tower).
-    product_text_map = load_product_text_map(products_path, aisles_path, departments_path)
+    product_text_map = load_product_text_map(
+        products_path, aisles_path, departments_path
+    )
     logger.info("  -> %d products", len(product_text_map))
 
     # Step 2: Load orders; optionally limit to first max_target_orders for fast runs.
@@ -350,11 +383,17 @@ def run(
     users_needed = set(target_orders["user_id"].tolist())
     history_orders = history_orders[history_orders["user_id"].isin(users_needed)]
     history_order_ids = set(history_orders["order_id"].tolist())
-    logger.info("  -> target: %d orders, history: %d orders", len(target_orders), len(history_order_ids))
+    logger.info(
+        "  -> target: %d orders, history: %d orders",
+        len(target_orders),
+        len(history_order_ids),
+    )
 
     # Step 3: For each history order, list of product_ids (chunked read).
     logger.info("[Step 3/7] Building order -> products mapping (chunked read)...")
-    order_to_products = build_order_to_products(order_products_prior_path, history_order_ids)
+    order_to_products = build_order_to_products(
+        order_products_prior_path, history_order_ids
+    )
     logger.info("  -> %d orders with products", len(order_to_products))
 
     # Step 4: For each target order, build user context string from history orders only.
@@ -402,17 +441,25 @@ def run(
         train_anchors = train_df["anchor"].tolist()
         train_positives = train_df["positive"].tolist()
 
-    train_dataset = Dataset.from_dict({"anchor": train_anchors, "positive": train_positives})
+    train_dataset = Dataset.from_dict(
+        {"anchor": train_anchors, "positive": train_positives}
+    )
 
     # Build eval artifacts for InformationRetrievalEvaluator: queries, corpus, relevant_docs.
     # When eval_serve_time=True, strip " Next: ..." from queries so eval matches production (we don't know next order at serve time).
     if eval_serve_time:
         logger.info("  -> Eval queries: stripping 'Next:' clause (serve-time aligned)")
         eval_queries = {
-            str(oid): strip_next_order_from_context(order_id_to_context[oid]) for oid in eval_order_ids if oid in order_id_to_context
+            str(oid): strip_next_order_from_context(order_id_to_context[oid])
+            for oid in eval_order_ids
+            if oid in order_id_to_context
         }
     else:
-        eval_queries = {str(oid): order_id_to_context[oid] for oid in eval_order_ids if oid in order_id_to_context}
+        eval_queries = {
+            str(oid): order_id_to_context[oid]
+            for oid in eval_order_ids
+            if oid in order_id_to_context
+        }
     eval_relevant_docs = {str(oid): set() for oid in eval_order_ids}
     train_op = pd.read_csv(order_products_train_path)
     for _, row in train_op.iterrows():
@@ -422,8 +469,14 @@ def run(
             eval_relevant_docs[oid_str].add(str(int(row["product_id"])))
     eval_corpus = {str(pid): text for pid, text in product_text_map.items()}
 
-    eval_dataset = Dataset.from_dict({"anchor": eval_anchors, "positive": eval_positives}) if eval_anchors and eval_positives else None
-    logger.info("  -> train: %d pairs, eval: %d pairs", len(train_anchors), len(eval_anchors))
+    eval_dataset = (
+        Dataset.from_dict({"anchor": eval_anchors, "positive": eval_positives})
+        if eval_anchors and eval_positives
+        else None
+    )
+    logger.info(
+        "  -> train: %d pairs, eval: %d pairs", len(train_anchors), len(eval_anchors)
+    )
 
     # Save all outputs to effective_output_dir (param-based subdir).
     logger.info("[Step 7/7] Saving outputs to %s...", effective_output_dir)
@@ -456,7 +509,10 @@ def run(
         json.dump(data_prep_params, f, indent=2)
 
     logger.info("Done. Saved to %s", effective_output_dir)
-    logger.info("Train with: python -m src.train.train_sbert --processed-dir %s", effective_output_dir)
+    logger.info(
+        "Train with: python -m src.train.train_sbert --processed-dir %s",
+        effective_output_dir,
+    )
     return train_dataset, eval_dataset, eval_queries, eval_corpus, eval_relevant_docs
 
 
@@ -464,21 +520,53 @@ def main() -> None:
     """
     CLI entrypoint: parse arguments, call run(), and print summary.
     """
-    parser = argparse.ArgumentParser(description="Prepare Instacart data for two-tower SBERT training")
-    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR, help="Path to data/ folder")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_PROCESSED_DIR, help="Path to save processed datasets")
-    parser.add_argument("--max-prior-orders", type=int, default=5, help="Max prior orders per user context (default 5 for faster training)")
-    parser.add_argument(
-        "--max-product-names", type=int, default=20, help="Max product names in user context (default 20 for faster training)"
+    parser = argparse.ArgumentParser(
+        description="Prepare Instacart data for two-tower SBERT training"
     )
-    parser.add_argument("--sample-frac", type=float, default=None, help="Fraction of train pairs to keep (e.g. 0.2)")
-    parser.add_argument("--eval-frac", type=float, default=0.1, help="Fraction of orders for eval (Information retrieval evaluator)")
+    parser.add_argument(
+        "--data-dir", type=Path, default=DEFAULT_DATA_DIR, help="Path to data/ folder"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_PROCESSED_DIR,
+        help="Path to save processed datasets",
+    )
+    parser.add_argument(
+        "--max-prior-orders",
+        type=int,
+        default=5,
+        help="Max prior orders per user context (default 5 for faster training)",
+    )
+    parser.add_argument(
+        "--max-product-names",
+        type=int,
+        default=20,
+        help="Max product names in user context (default 20 for faster training)",
+    )
+    parser.add_argument(
+        "--sample-frac",
+        type=float,
+        default=None,
+        help="Fraction of train pairs to keep (e.g. 0.2)",
+    )
+    parser.add_argument(
+        "--eval-frac",
+        type=float,
+        default=0.1,
+        help="Fraction of orders for eval (Information retrieval evaluator)",
+    )
     parser.add_argument(
         "--no-eval-serve-time",
         action="store_true",
         help="Keep 'Next: ...' in eval queries (matches training anchor; eval is optimistic). Default: strip it so eval matches production.",
     )
-    parser.add_argument("--max-target-orders", type=int, default=None, help="Limit target orders (for quick runs)")
+    parser.add_argument(
+        "--max-target-orders",
+        type=int,
+        default=None,
+        help="Limit target orders (for quick runs)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 

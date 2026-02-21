@@ -51,7 +51,9 @@ def setup_colored_logging(
     logging.root.setLevel(level)
 
 
-def resolve_processed_dir(processed_dir: Path, default_processed_dir: Path) -> tuple[Path, str | None]:
+def resolve_processed_dir(
+    processed_dir: Path, default_processed_dir: Path
+) -> tuple[Path, str | None]:
     """Resolve processed dir, auto-selecting a param subdir when using the default and no train_dataset at top level.
 
     When processed_dir is the default (e.g. processed/) and has no train_dataset, looks for subdirs
@@ -68,15 +70,21 @@ def resolve_processed_dir(processed_dir: Path, default_processed_dir: Path) -> t
 
     if not train_path.exists() and processed_dir == default_processed_dir:
         subdirs_with_data = [
-            d for d in processed_dir.iterdir()
+            d
+            for d in processed_dir.iterdir()
             if d.is_dir() and (d / "train_dataset").exists()
         ]
         if len(subdirs_with_data) == 1:
             resolved = subdirs_with_data[0]
             return resolved, f"  -> Using param subdir: {resolved.name}"
         if len(subdirs_with_data) > 1:
-            resolved = max(subdirs_with_data, key=lambda d: (d / "train_dataset").stat().st_mtime)
-            return resolved, f"  -> Multiple subdirs found, using latest: {resolved.name}"
+            resolved = max(
+                subdirs_with_data, key=lambda d: (d / "train_dataset").stat().st_mtime
+            )
+            return (
+                resolved,
+                f"  -> Multiple subdirs found, using latest: {resolved.name}",
+            )
 
     if not train_path.exists():
         raise FileNotFoundError(
