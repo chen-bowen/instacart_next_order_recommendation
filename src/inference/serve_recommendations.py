@@ -53,9 +53,7 @@ def _index_dir(corpus_path: Path, model_dir: Path) -> Path:
     return Path(corpus_path).parent / INDEX_SUBDIR / name
 
 
-def _load_index(
-    index_dir: Path, corpus_path: Path, model_dir: Path
-) -> tuple[np.ndarray, list[str]] | None:
+def _load_index(index_dir: Path, corpus_path: Path, model_dir: Path) -> tuple[np.ndarray, list[str]] | None:
     """
     Load cached product embeddings if manifest matches current corpus and model.
     Returns (embeddings, product_ids) or None if cache miss or invalid.
@@ -71,10 +69,7 @@ def _load_index(
     corpus_resolved = str(Path(corpus_path).resolve())
     model_resolved = str(Path(model_dir).resolve())
     try:
-        if (
-            meta.get("corpus_path") != corpus_resolved
-            or meta.get("model_dir") != model_resolved
-        ):
+        if meta.get("corpus_path") != corpus_resolved or meta.get("model_dir") != model_resolved:
             return None
         if meta.get("corpus_mtime") != Path(corpus_path).stat().st_mtime:
             return None
@@ -119,9 +114,7 @@ def _save_index(
     np.save(index_dir / EMBEDDINGS_FILENAME, embeddings.astype(np.float32))
     with open(index_dir / PRODUCT_IDS_FILENAME, "w") as f:
         json.dump(product_ids, f)
-    logger.info(
-        "Saved embedding index to %s (%d products)", index_dir, len(product_ids)
-    )
+    logger.info("Saved embedding index to %s (%d products)", index_dir, len(product_ids))
 
 
 def load_corpus(corpus_path: Path) -> tuple[list[str], list[str]]:
@@ -133,9 +126,7 @@ def load_corpus(corpus_path: Path) -> tuple[list[str], list[str]]:
         product_texts: List of product text strings.
     """
     with open(corpus_path, "r") as f:
-        corpus = json.load(
-            f
-        )  # Dict: product_id -> "Product: X. Aisle: Y. Department: Z."
+        corpus = json.load(f)  # Dict: product_id -> "Product: X. Aisle: Y. Department: Z."
     ids = list(corpus.keys())  # Preserve order for alignment with embeddings
     texts = [corpus[pid] for pid in ids]  # Parallel list of product text strings
     return ids, texts
@@ -156,22 +147,12 @@ class Recommender:
     ):
         self.model_dir = Path(model_dir)
         self.corpus_path = Path(corpus_path)
-        self.product_ids, self.product_texts = load_corpus(
-            self.corpus_path
-        )  # Parallel lists
-        self.pid_to_text = dict(
-            zip(self.product_ids, self.product_texts)
-        )  # O(1) lookup for printing
+        self.product_ids, self.product_texts = load_corpus(self.corpus_path)  # Parallel lists
+        self.pid_to_text = dict(zip(self.product_ids, self.product_texts))  # O(1) lookup for printing
 
-        self.model = SentenceTransformer(
-            str(self.model_dir)
-        )  # Always needed to encode queries
+        self.model = SentenceTransformer(str(self.model_dir))  # Always needed to encode queries
         index_dir = _index_dir(self.corpus_path, self.model_dir)
-        cached = (
-            _load_index(index_dir, self.corpus_path, self.model_dir)
-            if use_index
-            else None
-        )
+        cached = _load_index(index_dir, self.corpus_path, self.model_dir) if use_index else None
         if cached is not None:
             embeddings, ids = cached
             if ids == self.product_ids:
@@ -224,7 +205,10 @@ class Recommender:
             List of (product_id, score) sorted by score descending. Score is cosine similarity.
         """
         # Encode user context to embedding (same space as products)
-        query_emb = self.model.encode([query], normalize_embeddings=True,)[
+        query_emb = self.model.encode(
+            [query],
+            normalize_embeddings=True,
+        )[
             0
         ]  # [0] extracts single embedding from batch of 1
         # Cosine similarity between query and each product (both L2-normalized -> dot product = cosine)
@@ -245,19 +229,36 @@ class Recommender:
         return results
 
 
+# Session cache: (model_dir, corpus_path, use_index) -> Recommender. Reuse so we don't reload index in the same process.
+_recommender_cache: dict[tuple[Path, Path, bool], Recommender] = {}
+
+
 def load_recommender(
     model_dir: Path = DEFAULT_MODEL_DIR,
     corpus_path: Path = DEFAULT_CORPUS_PATH,
     batch_size: int = 64,
     use_index: bool = True,
 ) -> Recommender:
-    """Load model and corpus, return a Recommender instance (for repeated recommend() calls)."""
-    return Recommender(
+    """Load model and corpus, return a Recommender instance (for repeated recommend() calls).
+    If the same (model_dir, corpus_path, use_index) was already loaded this session, returns that instance (no reload)."""
+    model_dir = Path(model_dir).resolve()
+    corpus_path = Path(corpus_path).resolve()
+    key = (model_dir, corpus_path, use_index)
+    if key in _recommender_cache:
+        logger.info(
+            "Reusing recommender from session cache (model %s, corpus %s)",
+            model_dir,
+            corpus_path.name,
+        )
+        return _recommender_cache[key]
+    rec = Recommender(
         model_dir=model_dir,
         corpus_path=corpus_path,
         batch_size=batch_size,
         use_index=use_index,
     )
+    _recommender_cache[key] = rec
+    return rec
 
 
 def recommend(
@@ -270,9 +271,7 @@ def recommend(
     One-shot: load recommender and return top-k for the query.
     For repeated calls, use load_recommender() once and call .recommend() on it.
     """
-    rec = load_recommender(
-        model_dir=model_dir, corpus_path=corpus_path
-    )  # Loads model + encodes corpus
+    rec = load_recommender(model_dir=model_dir, corpus_path=corpus_path)  # Loads model + encodes corpus
     return rec.recommend(query=query, top_k=top_k)  # Encode query, rank, return top-k
 
 
@@ -308,9 +307,7 @@ def main() -> None:
         default=None,
         help="Use query from eval_queries.json by ID",
     )
-    parser.add_argument(
-        "--top-k", type=int, default=10, help="Number of recommendations to return"
-    )
+    parser.add_argument("--top-k", type=int, default=10, help="Number of recommendations to return")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")  # Simple log format
@@ -338,9 +335,7 @@ def main() -> None:
         # Demo: use only info available at serve time (past orders + timing). We do NOT know
         # when the user's next order will be, so we omit "Next order: ..." used in training.
         query = "[+7d w4h14] Organic Milk, Whole Wheat Bread."
-        print(
-            "No --query or --eval-query-id given. Using demo query (past orders only):\n"
-        )
+        print("No --query or --eval-query-id given. Using demo query (past orders only):\n")
         print(f"  {query}\n")
 
     # Encode query, rank products by similarity, return top-k
@@ -349,7 +344,7 @@ def main() -> None:
     print(f"Top-{args.top_k} recommendations:")
     for i, (pid, score) in enumerate(results, 1):
         text = rec.pid_to_text[pid]
-        print(f"  {i}. product_id={pid} (score={score:.4f}) {text[:60]}...")
+        print(f"  {i}. product_id={pid} (score={score:.4f}) {text}")
 
 
 if __name__ == "__main__":

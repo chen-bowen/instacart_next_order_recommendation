@@ -35,24 +35,21 @@ Proof-of-concept for **next-order product recommendation** using the [Instacart 
 ## Setup
 
 1. **Clone or open the repo** and enter the project root.
-
 2. **Install dependencies** (prefer `uv` for a locked environment):
 
-   ```bash
-   uv sync
-   ```
+```bash
+ uv sync
+```
 
-   Or with pip: `pip install -e .` (see `pyproject.toml` for dependencies).
+Or with pip: `pip install -e .` (see `pyproject.toml` for dependencies). 3. **Download the Instacart data** from Kaggle into `data/`. You need at least:
 
-3. **Download the Instacart data** from Kaggle into `data/`. You need at least:
-   - `orders.csv`
-   - `order_products__prior.csv`
-   - `products.csv`
-   - `aisles.csv`
-   - `departments.csv`
+- `orders.csv`
+- `order_products__prior.csv`
+- `products.csv`
+- `aisles.csv`
+- `departments.csv`
 
 4. **Optional:** Create a `.env` file in the project root with `HF_TOKEN=...` if you use private Hugging Face models or datasets.
-
 5. **Verify:** Run data prep (see Pipeline below); it will fail with a clear error if any CSV is missing or misnamed.
 
 ---
@@ -61,13 +58,13 @@ Proof-of-concept for **next-order product recommendation** using the [Instacart 
 
 ### Input files (under `data/`)
 
-| File                            | Key columns                                                                                         | Role                                                                                                                          |
-| ------------------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| **orders.csv**                  | order_id, user_id, **eval_set**, order_number, order_dow, order_hour_of_day, days_since_prior_order | `eval_set == "train"` → target “next” orders we predict for; `eval_set == "prior"` → history used to build user context only. |
-| **order_products\_\_prior.csv** | order_id, product_id                                                                                | Which products are in each prior order; used to build (anchor, positive) pairs.                                               |
-| **products.csv**                | product_id, product_name, aisle_id, department_id                                                   | Product names and hierarchy.                                                                                                  |
-| **aisles.csv**                  | aisle_id, aisle                                                                                     | Aisle names for product text.                                                                                                 |
-| **departments.csv**             | department_id, department                                                                           | Department names for product text.                                                                                            |
+| File                        | Key columns                                                                                         | Role                                                                                                                          |
+| --------------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| **orders.csv**              | order_id, user_id, **eval_set**, order_number, order_dow, order_hour_of_day, days_since_prior_order | `eval_set == "train"` → target “next” orders we predict for; `eval_set == "prior"` → history used to build user context only. |
+| **order_productsprior.csv** | order_id, product_id                                                                                | Which products are in each prior order; used to build (anchor, positive) pairs.                                               |
+| **products.csv**            | product_id, product_name, aisle_id, department_id                                                   | Product names and hierarchy.                                                                                                  |
+| **aisles.csv**              | aisle_id, aisle                                                                                     | Aisle names for product text.                                                                                                 |
+| **departments.csv**         | department_id, department                                                                           | Department names for product text.                                                                                            |
 
 No `order_products__train.csv` is required for this pipeline: we only use prior orders for context and the train-set orders to define _which_ next order we are predicting (and to split train/eval by order).
 
@@ -118,10 +115,11 @@ uv run python -m src.train.train_sbert --lr 1e-4
 # Faster training (no IR eval): --no-information-retrieval-evaluator
 
 # 3. Serve (demo: no --query uses built-in example)
-uv run python -m src.inference.serve_recommendations --top-k 10
+uv run python -m src.inference --top-k 10
 # With corpus and model: --corpus processed/p5_mp20_ef0.1/eval_corpus.json --model-dir models/two_tower_sbert/final
 # Custom query: --query "[+7d w4h14] Milk, Bread."
 # Real eval query: --eval-query-id <order_id>
+uv run python -m src.inference --corpus processed/p5_mp20_ef0.1/eval_corpus.json --eval-query-id 3178496
 ```
 
 ---
@@ -168,31 +166,60 @@ After one epoch the model puts at least one correct product in the top-10 for ab
 
 ### Demo inference
 
-The serve script can be run without `--query` to use a **built-in demo query** that mimics a user who previously ordered “Organic Milk, Whole Wheat Bread” in a context where the last order was 7 days prior, on weekday 4 at hour 14. The format is:
+The serve script supports two ways to try it. **1. Built-in demo query** — Run without `--query` to use a **built-in demo query** that mimics a user who previously ordered “Organic Milk, Whole Wheat Bread” in a context where the last order was 7 days prior, on weekday 4 at hour 14. The format is:
 
-- **`[+7d w4h14]`** — shorthand for “ordered 7 days after previous order, on weekday 4 (0–6), at hour 14”.
-- **`Organic Milk, Whole Wheat Bread.`** — product names from prior orders (sequence preserved, comma-separated).
+- `**[+7d w4h14]`\*\* — shorthand for “ordered 7 days after previous order, on weekday 4 (0–6), at hour 14”.
+- `**Organic Milk, Whole Wheat Bread.**` — product names from prior orders (sequence preserved, comma-separated).
 
 So the full string is exactly what the data prep pipeline produces for the “anchor” side when we strip the “Next: …” part. You can pass any custom context with `--query "..."` or run on a stored eval query with `--eval-query-id <order_id>` (the script then loads that order’s context from `eval_queries.json`).
 
-**Example run (no args beyond --top-k):**
+**Example run:**
+
+```bash
+uv run python -m src.inference --top-k 5
+```
+
+**Example query and top-5 output:**
 
 ```
 [+7d w4h14] Organic Milk, Whole Wheat Bread.
-```
 
-**Example top-5 output:**
-
-```
 Top-5 recommendations:
-  1. product_id=48628 (score=0.7877) Product: Organic Whole Wheat Bread. Aisle: bread. Department...
-  2. product_id=13517 (score=0.7850) Product: Whole Wheat Bread. Aisle: bread. Department: bakery...
-  3. product_id=44103 (score=0.7241) Product: Honey Whole Wheat Bread. Aisle: bread. Department: ...
-  4. product_id=6454 (score=0.7207) Product: Whole Wheat Bread Loaf. Aisle: bread. Department: b...
-  5. product_id=38591 (score=0.6624) Product: Organic Whole Wheat. Aisle: bread. Department: bake...
+  1. product_id=13517 (score=0.7639) Product: Whole Wheat Bread. Aisle: bread. Department: bakery.
+  2. product_id=34479 (score=0.7101) Product: Whole Wheat Walnut Bread. Aisle: bread. Department: bakery.
+  3. product_id=48628 (score=0.7062) Product: Organic Whole Wheat Bread. Aisle: bread. Department: bakery.
+  4. product_id=1463 (score=0.6928) Product: Organic Milk. Aisle: milk. Department: dairy eggs.
+  5. product_id=16490 (score=0.6510) Product: Old Fashioned Whole Wheat Bread. Aisle: bread. Department: bakery.
 ```
 
-Scores are **cosine similarity** between the encoded query and each product embedding, in [0, 1] when embeddings are L2-normalized. Use `--eval-query-id` to test on a real eval order and compare with that order’s actual next basket.
+**2. Eval-query demo** — Use a real hold-out order from `eval_queries.json` and compare recommendations with that order's actual next basket:
+
+```bash
+uv run python -m src.inference --corpus processed/p5_mp20_ef0.1/eval_corpus.json --eval-query-id 3178496 --top-k 10
+```
+
+**Example output (query truncated, then top-10):**
+
+```
+Query (eval_id=3178496):
+  [+30d w5h23] Chicken Base, Organic, Lemonade, Black Bean Garlic Sauce; [+8d w6h1] Wild Sardines in Extra Virgin Olive Oil, Pulp Free Orange Juice, Organic Multigrain with Flax English Muffins, Organic...
+
+Top-10 recommendations:
+  1. product_id=22170 (score=0.6053) Product: Organic Multigrain with Flax English Muffins. Aisle: breakfast bakery. Department: bakery.
+  2. product_id=34044 (score=0.5992) Product: Organic Orange Juice with Pulp. Aisle: refrigerated. Department: beverages.
+  3. product_id=39108 (score=0.5956) Product: Pulp Free Orange Juice. Aisle: refrigerated. Department: beverages.
+  4. product_id=47731 (score=0.5768) Product: Pulp Free Orange Juice With Tangerine. Aisle: refrigerated. Department: beverages.
+  5. product_id=23034 (score=0.5758) Product: Juice, Original + Honey, Exposed, Pulp Free. Aisle: juice nectars. Department: beverages.
+  6. product_id=17326 (score=0.5720) Product: Natural Wild Caught Brisling Sardines in Extra Virgin Olive Oil. Aisle: canned meat seafood. Department: canned goods.
+  7. product_id=21683 (score=0.5675) Product: Organic Multigrain English Muffins. Aisle: buns rolls. Department: bakery.
+  8. product_id=12331 (score=0.5669) Product: Wild Sardines in Extra Virgin Olive Oil with Lemon. Aisle: canned meat seafood. Department: canned goods.
+  9. product_id=45079 (score=0.5666) Product: Blood Orange Lemonade. Aisle: juice nectars. Department: beverages.
+  10. product_id=3585 (score=0.5653) Product: Exposed Pulp and Juice Original Aloe Vera + Honey. Aisle: refrigerated. Department: beverages.
+```
+
+The script prints that order's full context (truncated above) and the top-k product IDs; check `eval_relevant_docs.json` for that order_id to see the ground-truth products for comparison.
+
+You can also pass any custom context with `--query "..."`. Scores are **cosine similarity** between the encoded query and each product embedding, in [0, 1] when embeddings are L2-normalized.
 
 ---
 
@@ -210,7 +237,7 @@ Scores are **cosine similarity** between the encoded query and each product embe
 | Path                                       | Description                                                                                                                                       |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **data/**                                  | Raw Instacart CSVs (not in repo; user downloads from Kaggle).                                                                                     |
-| **processed/<param>/**                     | Data prep output: `train_dataset/`, `eval_dataset/`, `eval_queries.json`, `eval_corpus.json`, `eval_relevant_docs.json`, `data_prep_params.json`. |
+| **processed/\*\***/\*\*                    | Data prep output: `train_dataset/`, `eval_dataset/`, `eval_queries.json`, `eval_corpus.json`, `eval_relevant_docs.json`, `data_prep_params.json`. |
 | **models/two_tower_sbert/**                | Training checkpoints (e.g. `checkpoint-58419/`) and `final/` (best by NDCG@10 when IR eval is on).                                                |
 | **src/constants.py**                       | `PROJECT_ROOT`, `DEFAULT_DATA_DIR`, `DEFAULT_PROCESSED_DIR`, `DEFAULT_OUTPUT_DIR`, `DEFAULT_MODEL_DIR`, `DEFAULT_CORPUS_PATH`.                    |
 | **src/utils.py**                           | `setup_colored_logging()`, `resolve_processed_dir()` (auto-resolve processed dir to a param subdir when needed).                                  |
