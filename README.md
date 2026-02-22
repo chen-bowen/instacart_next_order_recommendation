@@ -167,26 +167,32 @@ After one epoch the model puts at least one correct product in the top-10 for ab
 To compare the two-tower SBERT model with simpler methods, the repo includes two baselines that use the **same eval set and metrics** (Accuracy@k, Recall@10, MRR@10, NDCG@10, MAP@100):
 
 - **Content-based (untrained SBERT):** Same base model (e.g. `all-MiniLM-L6-v2`) with **no fine-tuning**. Encodes query and product text with frozen pretrained weights; ranks by cosine similarity. Isolates the gain from training on Instacart (anchor, positive) pairs.
-- **Collaborative filtering (item-item):** No product text. Uses purchase history only: co-occurrence of products in the same order (`order_products__prior.csv`). For each eval order, the user’s prior basket is the set of products in their previous orders; each candidate is scored by the sum of co-occurrence counts with that basket ("bought X with Y"). Rank by score.
+- **Collaborative filtering (item-item):** No product text. Uses purchase history only: co-occurrence of products in the same order (`order_products__prior.csv`). For each eval order, the user’s prior basket is the set of products in their previous orders; each candidate is scored by the sum of co-occurrence counts with that basket ("bought X with Y"). Rank by score. Progress bars show: loading `order_products__prior`, building co-occurrence, building eval history, and CF ranking.
 
 **Baseline results** (same eval set as above: ~13k queries, ~50k corpus, `processed/p5_mp20_ef0.1`):
 
-| Metric       | Content-based (untrained SBERT) |
-| ------------- | --------------------------------- |
-| Accuracy@1    | 0.046                              |
-| Accuracy@10   | **0.136**                          |
-| Recall@10     | 0.030                              |
-| MRR@10        | 0.071                              |
-| NDCG@10       | 0.086                              |
-| MAP@100       | 0.018                              |
+| Metric      | Content-based (untrained SBERT) |
+| ----------- | ------------------------------- |
+| Accuracy@1  | 0.046                           |
+| Accuracy@10 | **0.136**                       |
+| Recall@10   | 0.030                           |
+| MRR@10      | 0.071                           |
+| NDCG@10     | 0.086                           |
+| MAP@100     | 0.018                           |
 
-Fine-tuned SBERT (4–5 epochs) reaches **Accuracy@10 ~0.54**, so training on Instacart (anchor, positive) pairs yields a large gain over the untrained content-based baseline. Collaborative filtering (item-item) metrics can be added after running `--cf-only` (build is slow; see baselines code for details).
+Fine-tuned SBERT (4–5 epochs) reaches **Accuracy@10 ~0.54**, so training on Instacart (anchor, positive) pairs yields a large gain over the untrained content-based baseline. Collaborative filtering (item-item) metrics can be added after running `--cf-only` (run can take up to 4 hours minutes; progress bars show progress).
 
-Run both baselines and print metrics:
+**Run baselines:**
 
 ```bash
+# Both baselines (content-based then CF)
 uv run python -m src.baselines --processed-dir processed/p5_mp20_ef0.1
-# Or: uv run python -m src.baselines.run_baselines --processed-dir processed/p5_mp20_ef0.1
+
+# Content-based only (faster)
+uv run python -m src.baselines --processed-dir processed/p5_mp20_ef0.1 --content-only
+
+# CF only (progress bars for loading prior orders, co-occurrence, eval history, ranking)
+uv run python -m src.baselines --processed-dir processed/p5_mp20_ef0.1 --cf-only
 ```
 
 Typical expectation: **SBERT (after 4–5 epochs) outperforms both** (e.g. Accuracy@10 ~0.54 vs lower for untrained SBERT and item-item CF), by leveraging fine-tuning on user-context and learned embeddings. The baselines quantify the gain from the trained two-tower setup.
@@ -273,7 +279,7 @@ You can also pass any custom context with `--query "..."`. Scores are **cosine s
 | **src/data/prepare_instacart_sbert.py**    | Builds (anchor, positive) pairs from CSVs, splits train/eval by order, writes Datasets and IR artifacts.                                                                                                                                          |
 | **src/train/train_sbert.py**               | Loads processed data, builds Sentence Transformer + MultipleNegativesRankingLoss, runs trainer with optional InformationRetrievalEvaluator.                                                                                                       |
 | **src/inference/serve_recommendations.py** | Embedding-based serve: loads model and corpus, caches product embeddings on disk (and in-session); encodes query, returns top-k by cosine similarity. CLI via `python -m src.inference`; API: `load_recommender()`, `Recommender`, `recommend()`. |
-| **src/baselines/**                         | Content-based (untrained SBERT) and CF (item-item) baselines; same eval and metrics as SBERT. Run: `python -m src.baselines`.                                                                                                                      |
+| **src/baselines/**                         | Content-based (untrained SBERT) and CF (item-item) baselines; same eval and metrics as SBERT. Run: `python -m src.baselines`.                                                                                                                     |
 | **notebooks/**                             | Jupyter notebooks for data prep, training, and serve (mirror the scripts for interactive use).                                                                                                                                                    |
 | **pyproject.toml**, **uv.lock**            | Project and dependency lock (uv).                                                                                                                                                                                                                 |
 
