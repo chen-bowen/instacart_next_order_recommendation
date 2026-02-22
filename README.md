@@ -171,16 +171,16 @@ To compare the two-tower SBERT model with simpler methods, the repo includes two
 
 **Baseline results** (same eval set as above: ~13k queries, ~50k corpus, `processed/p5_mp20_ef0.1`):
 
-| Metric      | Content-based (untrained SBERT) |
-| ----------- | ------------------------------- |
-| Accuracy@1  | 0.046                           |
-| Accuracy@10 | **0.136**                       |
-| Recall@10   | 0.030                           |
-| MRR@10      | 0.071                           |
-| NDCG@10     | 0.086                           |
-| MAP@100     | 0.018                           |
+| Metric      | Content-based (untrained SBERT) | Collaborative filtering (item-item) |
+| ----------- | ------------------------------- | ----------------------------------- |
+| Accuracy@1  | 0.046                           | 0.030                               |
+| Accuracy@10 | 0.136                           | 0.148                               |
+| Recall@10   | 0.030                           | 0.017                               |
+| MRR@10      | 0.071                           | 0.059                               |
+| NDCG@10     | 0.086                           | 0.080                               |
+| MAP@100     | 0.018                           | 0.010                               |
 
-Fine-tuned SBERT (4–5 epochs) reaches **Accuracy@10 ~0.54**, so training on Instacart (anchor, positive) pairs yields a large gain over the untrained content-based baseline. Collaborative filtering (item-item) metrics can be added after running `--cf-only` (run can take up to 4 hours minutes; progress bars show progress).
+Fine-tuned SBERT (4–5 epochs) reaches **Accuracy@10 ~0.54**, so training on Instacart (anchor, positive) pairs yields a large gain over both baselines. CF runs can take several hours (progress bars show progress).
 
 **Run baselines:**
 
@@ -280,7 +280,7 @@ You can also pass any custom context with `--query "..."`. Scores are **cosine s
 | **src/train/train_sbert.py**               | Loads processed data, builds Sentence Transformer + MultipleNegativesRankingLoss, runs trainer with optional InformationRetrievalEvaluator.                                                                                                       |
 | **src/inference/serve_recommendations.py** | Embedding-based serve: loads model and corpus, caches product embeddings on disk (and in-session); encodes query, returns top-k by cosine similarity. CLI via `python -m src.inference`; API: `load_recommender()`, `Recommender`, `recommend()`. |
 | **src/baselines/**                         | Content-based (untrained SBERT) and CF (item-item) baselines; same eval and metrics as SBERT. Run: `python -m src.baselines`.                                                                                                                     |
-| **notebooks/**                             | Jupyter notebooks for data prep, training, and serve (mirror the scripts for interactive use).                                                                                                                                                    |
+| **notebooks/**                             | Jupyter notebooks for data prep, training, serve, and baselines (mirror the scripts for interactive use).                                                                                                                                        |
 | **pyproject.toml**, **uv.lock**            | Project and dependency lock (uv).                                                                                                                                                                                                                 |
 
 ---
