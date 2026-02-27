@@ -120,6 +120,9 @@ uv run python -m src.inference --top-k 10
 # Custom query: --query "[+7d w4h14] Milk, Bread."
 # Real eval query: --eval-query-id <order_id>
 uv run python -m src.inference --corpus processed/p5_mp20_ef0.1/eval_corpus.json --eval-query-id 3178496
+
+# 4. Serve as an HTTP API (FastAPI)
+uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 ```
 
 ---
@@ -282,6 +285,120 @@ You can also pass any custom context with `--query "..."`. Scores are **cosine s
 | **src/baselines/**                         | Content-based (untrained SBERT) and CF (item-item) baselines; same eval and metrics as SBERT. Run: `python -m src.baselines`.                                                                                                                     |
 | **notebooks/**                             | Jupyter notebooks for data prep, training, serve, and baselines (mirror the scripts for interactive use).                                                                                                                                        |
 | **pyproject.toml**, **uv.lock**            | Project and dependency lock (uv).                                                                                                                                                                                                                 |
+
+---
+
+## REST API, Feedback Loop, and Monitoring
+
+### Running the API
+
+Start the FastAPI service after you have trained a model and built a product corpus:
+
+```bash
+uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+```
+
+Environment overrides:
+
+- `MODEL_DIR`: path to the trained model directory (defaults to `models/two_tower_sbert/final`).
+- `CORPUS_PATH`: path to the product corpus JSON (defaults to `processed/eval_corpus.json` or a param subdir).
+- `FEEDBACK_DB_PATH`: path to the SQLite database for feedback events (defaults to `data/feedback.db`).
+
+### Endpoints
+
+- `POST /recommend`: Get top-k product recommendations.
+- `POST /feedback`: Record feedback events (impression, click, add_to_cart, purchase).
+- `GET /health`: Liveness probe.
+- `GET /ready`: Readiness probe (model and corpus loaded).
+
+#### POST /recommend
+
+Request body:
+
+```json
+{
+  "user_context": "[+7d w4h14] Organic Milk, Whole Wheat Bread.",
+  "top_k": 10,
+  "exclude_product_ids": []
+}
+```
+
+Alternatively, for demos, you can provide a `user_id` (order_id as string) that is resolved via `eval_queries.json`:
+
+```json
+{
+  "user_id": "3178496",
+  "top_k": 10
+}
+```
+
+Response:
+
+```json
+{
+  "request_id": "b1c0d4b4-3c2f-4d5e-9a51-9f2ea6c5a123",
+  "recommendations": [
+    {
+      "product_id": "13517",
+      "score": 0.7639,
+      "product_text": "Product: Whole Wheat Bread. Aisle: bread. Department: bakery."
+    }
+  ]
+}
+```
+
+The `request_id` can be used to tie later feedback events back to this recommendation call.
+
+#### POST /feedback
+
+Send either a single event or a batch:
+
+```json
+{
+  "events": [
+    {
+      "request_id": "b1c0d4b4-3c2f-4d5e-9a51-9f2ea6c5a123",
+      "event_type": "impression",
+      "product_id": "13517",
+      "user_id": "123",
+      "metadata": {
+        "position": 1,
+        "surface": "homepage"
+      }
+    }
+  ]
+}
+```
+
+Event types:
+
+- `impression`
+- `click`
+- `add_to_cart`
+- `purchase`
+
+The events are stored in a SQLite database (`feedback_events` table) with indices on `request_id`, `event_type`, and `created_at` so you can later analyze engagement and conversion.
+
+### Monitoring
+
+- Every HTTP request is logged with a structured line that includes:
+  - path, method, status, `latency_ms`, and `request_id`.
+- Errors are logged with stack traces and the same `request_id`.
+- Responses include an `X-Request-ID` header to help trace calls across systems.
+
+`GET /health` returns:
+
+```json
+{ "status": "ok" }
+```
+
+`GET /ready` returns:
+
+```json
+{ "status": "ready" }
+```
+
+once the recommender model and corpus have been loaded.
 
 ---
 
