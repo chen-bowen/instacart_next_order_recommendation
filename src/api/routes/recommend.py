@@ -12,8 +12,13 @@ from src.api.schemas import (
     RecommendationItem,
     RecommendationRequest,
     RecommendationResponse,
+    RecommendationStats,
 )
-from src.inference.serve_recommendations import Recommender, load_recommender
+from src.inference.serve_recommendations import (
+    MonitoredRecommender,
+    Recommender,
+    load_monitored_recommender,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +50,7 @@ def get_recommender(request: Request) -> Recommender:
     if rec is None:
         # As a fallback, try to load using default constants; readiness endpoint should catch this earlier.
         logger.warning("Recommender not preloaded; loading on-demand")
-        rec = load_recommender()
+        rec = load_monitored_recommender()
         request.app.state.recommender = rec
     return rec
 
@@ -75,11 +80,23 @@ async def recommend_endpoint(
     # Generate request_id that clients can reuse when sending feedback.
     request_id = str(uuid4())
     exclude_ids = set(payload.exclude_product_ids or [])
-    results = recommender.recommend(
-        query=context,
-        top_k=payload.top_k,
-        exclude_product_ids=exclude_ids,
-    )
+    user_id_str = str(payload.user_id) if payload.user_id is not None else None
+
+    # MonitoredRecommender accepts user_id and sets _last_metrics; plain Recommender ignores user_id
+    if isinstance(recommender, MonitoredRecommender):
+        results = recommender.recommend(
+            query=context,
+            top_k=payload.top_k,
+            user_id=user_id_str,
+            exclude_product_ids=exclude_ids,
+        )
+    else:
+        results = recommender.recommend(
+            query=context,
+            top_k=payload.top_k,
+            exclude_product_ids=exclude_ids,
+        )
+
     items = [
         RecommendationItem(
             product_id=pid,
@@ -88,10 +105,24 @@ async def recommend_endpoint(
         )
         for pid, score in results
     ]
+
+    stats = None
+    if isinstance(recommender, MonitoredRecommender) and recommender._last_metrics is not None:
+        m = recommender._last_metrics
+        stats = RecommendationStats(
+            total_latency_ms=m.total_latency_ms,
+            query_embedding_time_ms=m.query_embedding_time_ms,
+            similarity_compute_time_ms=m.similarity_compute_time_ms,
+            num_recommendations=m.num_recommendations,
+            top_score=m.top_score,
+            avg_score=m.avg_score,
+            timestamp=m.timestamp,
+        )
+
     logger.info(
         "recommendation_served request_id=%s top_k=%d",
         request_id,
         len(items),
     )
-    return RecommendationResponse(request_id=request_id, recommendations=items)
+    return RecommendationResponse(request_id=request_id, recommendations=items, stats=stats)
 

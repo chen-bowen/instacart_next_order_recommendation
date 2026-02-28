@@ -19,7 +19,10 @@ import argparse  # Parse CLI flags like --query, --top-k
 import hashlib
 import json  # Load eval_corpus.json and eval_queries.json
 import logging  # Log model/corpus load
+import time
+from dataclasses import dataclass
 from pathlib import Path  # Path handling for model/corpus dirs
+from typing import Optional
 
 import numpy as np
 from dotenv import load_dotenv
@@ -44,6 +47,20 @@ logger = logging.getLogger(__name__)  # Module-level logger
 
 # Load .env from project root so HF_TOKEN is set before loading models from Hub
 load_dotenv(PROJECT_ROOT / ".env")
+
+
+@dataclass
+class RecommendationMetrics:
+    """Metrics logged per recommendation request."""
+
+    user_id: str
+    query_embedding_time_ms: float
+    similarity_compute_time_ms: float
+    total_latency_ms: float
+    num_recommendations: int
+    top_score: float
+    avg_score: float
+    timestamp: float
 
 
 def _index_dir(corpus_path: Path, model_dir: Path) -> Path:
@@ -229,8 +246,83 @@ class Recommender:
         return results
 
 
+class MonitoredRecommender(Recommender):
+    """Recommender with built-in timing and metrics logging."""
+
+    def __init__(self, *args, metrics_logger: Optional[logging.Logger] = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.metrics_logger = metrics_logger or logging.getLogger("recommender.metrics")
+        self._last_metrics: Optional[RecommendationMetrics] = None
+
+    def recommend(
+        self,
+        query: str,
+        top_k: int = 10,
+        user_id: Optional[str] = None,
+        exclude_product_ids: set[str] | None = None,
+    ) -> list[tuple[str, float]]:
+        """Recommend with instrumentation; sets self._last_metrics for API stats."""
+        start_time = time.time()
+
+        encode_start = time.time()
+        query_emb = self.model.encode(
+            [query],
+            normalize_embeddings=True,
+        )[0]
+        encode_time_ms = (time.time() - encode_start) * 1000
+
+        sim_start = time.time()
+        scores = cos_sim(query_emb, self.product_embeddings)[0]
+        indices = scores.argsort(descending=True)
+        sim_time_ms = (time.time() - sim_start) * 1000
+
+        results: list[tuple[str, float]] = []
+        excluded = exclude_product_ids or set()
+        for idx in indices:
+            pid = self.product_ids[idx]
+            if pid in excluded:
+                continue
+            results.append((pid, float(scores[idx])))
+            if len(results) >= top_k:
+                break
+
+        total_time_ms = (time.time() - start_time) * 1000
+        top_score = results[0][1] if results else 0.0
+        avg_score = sum(s for _, s in results) / len(results) if results else 0.0
+
+        self._last_metrics = RecommendationMetrics(
+            user_id=user_id or "anonymous",
+            query_embedding_time_ms=encode_time_ms,
+            similarity_compute_time_ms=sim_time_ms,
+            total_latency_ms=total_time_ms,
+            num_recommendations=len(results),
+            top_score=top_score,
+            avg_score=avg_score,
+            timestamp=time.time(),
+        )
+        self._log_metrics(self._last_metrics)
+
+        return results
+
+    def _log_metrics(self, metrics: RecommendationMetrics) -> None:
+        """Log metrics in structured format for aggregation (ELK, Datadog, CloudWatch)."""
+        self.metrics_logger.info(
+            "recommendation_served",
+            extra={
+                "user_id": metrics.user_id,
+                "latency_ms": metrics.total_latency_ms,
+                "encode_time_ms": metrics.query_embedding_time_ms,
+                "similarity_time_ms": metrics.similarity_compute_time_ms,
+                "num_results": metrics.num_recommendations,
+                "top_score": metrics.top_score,
+                "avg_score": metrics.avg_score,
+            },
+        )
+
+
 # Session cache: (model_dir, corpus_path, use_index) -> Recommender. Reuse so we don't reload index in the same process.
 _recommender_cache: dict[tuple[Path, Path, bool], Recommender] = {}
+_monitored_recommender_cache: dict[tuple[Path, Path, bool], MonitoredRecommender] = {}
 
 
 def load_recommender(
@@ -258,6 +350,35 @@ def load_recommender(
         use_index=use_index,
     )
     _recommender_cache[key] = rec
+    return rec
+
+
+def load_monitored_recommender(
+    model_dir: Path = DEFAULT_MODEL_DIR,
+    corpus_path: Path = DEFAULT_CORPUS_PATH,
+    batch_size: int = 64,
+    use_index: bool = True,
+    metrics_logger: Optional[logging.Logger] = None,
+) -> MonitoredRecommender:
+    """Load model and corpus, return a MonitoredRecommender (timing + metrics logging)."""
+    model_dir = Path(model_dir).resolve()
+    corpus_path = Path(corpus_path).resolve()
+    key = (model_dir, corpus_path, use_index)
+    if key in _monitored_recommender_cache:
+        logger.info(
+            "Reusing monitored recommender from session cache (model %s, corpus %s)",
+            model_dir,
+            corpus_path.name,
+        )
+        return _monitored_recommender_cache[key]
+    rec = MonitoredRecommender(
+        model_dir=model_dir,
+        corpus_path=corpus_path,
+        batch_size=batch_size,
+        use_index=use_index,
+        metrics_logger=metrics_logger,
+    )
+    _monitored_recommender_cache[key] = rec
     return rec
 
 

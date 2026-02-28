@@ -14,9 +14,9 @@ DEFAULT_PROCESSED_DIR = PROJECT_ROOT / "processed"
 # Training: where to read processed data and where to write checkpoints
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "models" / "two_tower_sbert"
 
-# Serve: trained model and product corpus (corpus may be in a param subdir, e.g. processed/p5_mp20_ef0.1/)
+# Serve: trained model and product corpus (data prep writes to param subdir, e.g. p5_mp20_ef0.1)
 DEFAULT_MODEL_DIR = PROJECT_ROOT / "models" / "two_tower_sbert" / "final"
-DEFAULT_CORPUS_PATH = PROJECT_ROOT / "processed" / "eval_corpus.json"
+DEFAULT_CORPUS_PATH = PROJECT_ROOT / "processed" / "p5_mp20_ef0.1" / "eval_corpus.json"
 
 # Embedding index cache (under corpus parent dir)
 INDEX_SUBDIR = ".embedding_index"

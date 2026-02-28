@@ -28,9 +28,22 @@ class RecommendationItem(BaseModel):
     product_text: Optional[str] = None
 
 
+class RecommendationStats(BaseModel):
+    """Per-request metrics returned with recommendations."""
+
+    total_latency_ms: float
+    query_embedding_time_ms: float
+    similarity_compute_time_ms: float
+    num_recommendations: int
+    top_score: float
+    avg_score: float
+    timestamp: float
+
+
 class RecommendationResponse(BaseModel):
     request_id: str
     recommendations: List[RecommendationItem]
+    stats: Optional[RecommendationStats] = None
 
 
 EventType = Literal["impression", "click", "add_to_cart", "purchase"]

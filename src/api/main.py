@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,21 +15,20 @@ from src.api.routes.feedback import router as feedback_router
 from src.api.routes.recommend import router as recommend_router
 from src.api.schemas import HealthResponse
 from src.constants import DEFAULT_CORPUS_PATH, DEFAULT_MODEL_DIR
-from src.inference.serve_recommendations import Recommender, load_recommender
+from src.inference.serve_recommendations import (
+    MonitoredRecommender,
+    load_monitored_recommender,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _resolve_model_dir() -> Path:
-    import os
-
     value = os.getenv("MODEL_DIR")
     return Path(value) if value else DEFAULT_MODEL_DIR
 
 
 def _resolve_corpus_path() -> Path:
-    import os
-
     value = os.getenv("CORPUS_PATH")
     return Path(value) if value else DEFAULT_CORPUS_PATH
 
@@ -45,20 +45,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logger.info("Starting Instacart recommendation API service")
 
+    # Initialize database
+    logger.info("Initializing database")
     init_db()
+
+    # Load recommender model
     model_dir = _resolve_model_dir().resolve()
     corpus_path = _resolve_corpus_path().resolve()
     logger.info("Loading recommender model_dir=%s corpus=%s", model_dir, corpus_path)
-    recommender: Recommender = load_recommender(model_dir=model_dir, corpus_path=corpus_path)
+    recommender: MonitoredRecommender = load_monitored_recommender(
+        model_dir=model_dir, corpus_path=corpus_path
+    )
+
+    # Set state variables
     app.state.recommender = recommender
     app.state.corpus_path = corpus_path
     app.state.ready = True
+
+    # Yield control to FastAPI
     try:
         yield
     finally:
         logger.info("Shutting down Instacart recommendation API service")
 
 
+# FastAPI app
 app = FastAPI(title="Instacart Next-Order Recommendation API", lifespan=lifespan)
 
 
@@ -111,4 +122,3 @@ async def ready(request: Request) -> HealthResponse:
 
 app.include_router(recommend_router)
 app.include_router(feedback_router)
-
