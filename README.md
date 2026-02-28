@@ -2,6 +2,9 @@
 
 Proof-of-concept for **next-order product recommendation** using the [Instacart orders dataset](https://www.kaggle.com/c/instacart-market-basket-analysis): a two-tower Sentence-BERT model where the **anchor** is user context (past orders + optional order pattern) and the **positive** is product text (name, aisle, department). Training uses `MultipleNegativesRankingLoss`; at serve time we encode the user context and rank products by cosine similarity.
 
+Here are the two medium blog posts explaining this code base in detail
+[part 1](https://medium.com/@bowenchen/from-purchase-history-to-recommendations-a-two-tower-approach-to-rank-products-c624d8a6c024)
+
 **Contents:** [What we are predicting](#what-we-are-predicting) · [Setup](#setup) · [Pipeline](#pipeline) · [API](#api) · [Results](#results) · [Project structure](#project-structure)
 
 ---
