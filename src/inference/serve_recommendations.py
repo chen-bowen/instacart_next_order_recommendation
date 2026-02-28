@@ -19,12 +19,14 @@ import argparse  # Parse CLI flags like --query, --top-k
 import hashlib
 import json  # Load eval_corpus.json and eval_queries.json
 import logging  # Log model/corpus load
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path  # Path handling for model/corpus dirs
 from typing import Optional
 
 import numpy as np
+import torch
 from dotenv import load_dotenv
 from sentence_transformers import (
     SentenceTransformer,
@@ -47,6 +49,21 @@ logger = logging.getLogger(__name__)  # Module-level logger
 
 # Load .env from project root so HF_TOKEN is set before loading models from Hub
 load_dotenv(PROJECT_ROOT / ".env")
+
+
+def _get_inference_device() -> str:
+    """
+    Return the best available device for inference: cuda > mps > cpu.
+    Override with INFERENCE_DEVICE env var (e.g. INFERENCE_DEVICE=cpu).
+    """
+    override = os.getenv("INFERENCE_DEVICE")
+    if override:
+        return override
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends.mps, "is_available", lambda: False)():
+        return "mps"
+    return "cpu"
 
 
 @dataclass
@@ -167,7 +184,9 @@ class Recommender:
         self.product_ids, self.product_texts = load_corpus(self.corpus_path)  # Parallel lists
         self.pid_to_text = dict(zip(self.product_ids, self.product_texts))  # O(1) lookup for printing
 
-        self.model = SentenceTransformer(str(self.model_dir))  # Always needed to encode queries
+        device = _get_inference_device()
+        logger.info("Using inference device: %s", device)
+        self.model = SentenceTransformer(str(self.model_dir), device=device)
         index_dir = _index_dir(self.corpus_path, self.model_dir)
         cached = _load_index(index_dir, self.corpus_path, self.model_dir) if use_index else None
         if cached is not None:
