@@ -2,6 +2,8 @@
 
 Proof-of-concept for **next-order product recommendation** using the [Instacart orders dataset](https://www.kaggle.com/c/instacart-market-basket-analysis): a two-tower Sentence-BERT model where the **anchor** is user context (past orders + optional order pattern) and the **positive** is product text (name, aisle, department). Training uses `MultipleNegativesRankingLoss`; at serve time we encode the user context and rank products by cosine similarity.
 
+**Contents:** [What we are predicting](#what-we-are-predicting) · [Setup](#setup) · [Pipeline](#pipeline) · [API](#api) · [Results](#results) · [Project structure](#project-structure)
+
 ---
 
 ## What we are predicting
@@ -121,7 +123,7 @@ uv run python -m src.inference --top-k 10
 # Real eval query: --eval-query-id <order_id>
 uv run python -m src.inference --corpus processed/p5_mp20_ef0.1/eval_corpus.json --eval-query-id 3178496
 
-# 4. Serve as an HTTP API (FastAPI)
+# 4. Serve as an HTTP API (FastAPI) — see API section for endpoints and docs
 uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -282,38 +284,48 @@ You can also pass any custom context with `--query "..."`. Scores are **cosine s
 | **src/data/prepare_instacart_sbert.py**    | Builds (anchor, positive) pairs from CSVs, splits train/eval by order, writes Datasets and IR artifacts.                                                                                                                                          |
 | **src/train/train_sbert.py**               | Loads processed data, builds Sentence Transformer + MultipleNegativesRankingLoss, runs trainer with optional InformationRetrievalEvaluator.                                                                                                       |
 | **src/inference/serve_recommendations.py** | Embedding-based serve: loads model and corpus, caches product embeddings on disk (and in-session); encodes query, returns top-k by cosine similarity. CLI via `python -m src.inference`; API: `load_recommender()`, `Recommender`, `recommend()`. |
+| **src/api/**                               | FastAPI service: `main.py` (app, health, ready), `routes/recommend.py`, `routes/feedback.py`, `schemas.py`, `feedback_store.py`. Run: `uvicorn src.api.main:app`.                                                                              |
 | **src/baselines/**                         | Content-based (untrained SBERT) and CF (item-item) baselines; same eval and metrics as SBERT. Run: `python -m src.baselines`.                                                                                                                     |
 | **notebooks/**                             | Jupyter notebooks for data prep, training, serve, and baselines (mirror the scripts for interactive use).                                                                                                                                        |
 | **pyproject.toml**, **uv.lock**            | Project and dependency lock (uv).                                                                                                                                                                                                                 |
 
 ---
 
-## REST API, Feedback Loop, and Monitoring
+## API
+
+The recommender is exposed as a **FastAPI** HTTP service with recommendation and feedback endpoints. Interactive docs are available at `/docs` (Swagger UI) and `/redoc` when the server is running.
 
 ### Running the API
 
-Start the FastAPI service after you have trained a model and built a product corpus:
+Start the service after you have trained a model and built a product corpus:
 
 ```bash
 uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 ```
 
-Environment overrides:
+Then open [http://localhost:8000/docs](http://localhost:8000/docs) for interactive API documentation.
 
-- `MODEL_DIR`: path to the trained model directory (defaults to `models/two_tower_sbert/final`).
-- `CORPUS_PATH`: path to the product corpus JSON (defaults to `processed/eval_corpus.json` or a param subdir).
-- `FEEDBACK_DB_PATH`: path to the SQLite database for feedback events (defaults to `data/feedback.db`).
+**Environment variables:**
+
+| Variable           | Description                                                                 |
+| ------------------ | --------------------------------------------------------------------------- |
+| `MODEL_DIR`        | Path to the trained model directory (default: `models/two_tower_sbert/final`) |
+| `CORPUS_PATH`      | Path to the product corpus JSON (default: `processed/.../eval_corpus.json`)  |
+| `FEEDBACK_DB_PATH` | Path to the SQLite database for feedback events (default: `data/feedback.db`) |
+| `INFERENCE_DEVICE` | Device for model inference: `cuda`, `mps` (Apple Silicon), or `cpu` (default: auto-detect) |
 
 ### Endpoints
 
-- `POST /recommend`: Get top-k product recommendations.
-- `POST /feedback`: Record feedback events (impression, click, add_to_cart, purchase).
-- `GET /health`: Liveness probe.
-- `GET /ready`: Readiness probe (model and corpus loaded).
+| Method | Path         | Description                                      |
+| ------ | ------------ | ------------------------------------------------ |
+| `POST` | `/recommend` | Get top-k product recommendations                |
+| `POST` | `/feedback`  | Record feedback events (impression, click, etc.)  |
+| `GET`  | `/health`    | Liveness probe                                   |
+| `GET`  | `/ready`     | Readiness probe (model and corpus loaded)        |
 
-#### POST /recommend
+### POST /recommend
 
-Request body:
+**Request body:**
 
 ```json
 {
@@ -323,7 +335,7 @@ Request body:
 }
 ```
 
-Alternatively, for demos, you can provide a `user_id` (order_id as string) that is resolved via `eval_queries.json`:
+Alternatively, for demos, provide a `user_id` (order_id as string) resolved via `eval_queries.json`:
 
 ```json
 {
@@ -332,7 +344,7 @@ Alternatively, for demos, you can provide a `user_id` (order_id as string) that 
 }
 ```
 
-Response:
+**Response:**
 
 ```json
 {
@@ -343,15 +355,25 @@ Response:
       "score": 0.7639,
       "product_text": "Product: Whole Wheat Bread. Aisle: bread. Department: bakery."
     }
-  ]
+  ],
+  "stats": {
+    "total_latency_ms": 12.5,
+    "query_embedding_time_ms": 8.2,
+    "similarity_compute_time_ms": 4.1,
+    "num_recommendations": 10,
+    "top_score": 0.7639,
+    "avg_score": 0.612,
+    "timestamp": 1730188800.0
+  }
 }
 ```
 
-The `request_id` can be used to tie later feedback events back to this recommendation call.
+- `request_id` — Use this to tie feedback events back to this recommendation.
+- `stats` — Optional; included when using `MonitoredRecommender` for latency and score metrics.
 
-#### POST /feedback
+### POST /feedback
 
-Send either a single event or a batch:
+Send a single event or a batch. Returns `202 Accepted`.
 
 ```json
 {
@@ -361,44 +383,22 @@ Send either a single event or a batch:
       "event_type": "impression",
       "product_id": "13517",
       "user_id": "123",
-      "metadata": {
-        "position": 1,
-        "surface": "homepage"
-      }
+      "metadata": { "position": 1, "surface": "homepage" }
     }
   ]
 }
 ```
 
-Event types:
+**Event types:** `impression`, `click`, `add_to_cart`, `purchase`
 
-- `impression`
-- `click`
-- `add_to_cart`
-- `purchase`
-
-The events are stored in a SQLite database (`feedback_events` table) with indices on `request_id`, `event_type`, and `created_at` so you can later analyze engagement and conversion.
+Events are stored in SQLite (`feedback_events` table) with indices on `request_id`, `event_type`, and `created_at`.
 
 ### Monitoring
 
-- Every HTTP request is logged with a structured line that includes:
-  - path, method, status, `latency_ms`, and `request_id`.
-- Errors are logged with stack traces and the same `request_id`.
-- Responses include an `X-Request-ID` header to help trace calls across systems.
-
-`GET /health` returns:
-
-```json
-{ "status": "ok" }
-```
-
-`GET /ready` returns:
-
-```json
-{ "status": "ready" }
-```
-
-once the recommender model and corpus have been loaded.
+- Structured request logging: `path`, `method`, `status`, `latency_ms`, `request_id`
+- `X-Request-ID` header on all responses for tracing
+- `GET /health` → `{ "status": "ok" }`
+- `GET /ready` → `{ "status": "ready" }` once model and corpus are loaded
 
 ---
 
