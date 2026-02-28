@@ -5,7 +5,7 @@ Proof-of-concept for **next-order product recommendation** using the [Instacart 
 Here are the two medium blog posts explaining this code base in detail
 [part 1](https://medium.com/@bowenchen/from-purchase-history-to-recommendations-a-two-tower-approach-to-rank-products-c624d8a6c024)
 
-**Contents:** [What we are predicting](#what-we-are-predicting) · [Setup](#setup) · [Pipeline](#pipeline) · [API](#api) · [Results](#results) · [Project structure](#project-structure)
+**Contents:** [What we are predicting](#what-we-are-predicting) · [Requirements](#requirements) · [Setup](#setup) · [How to use each component](#how-to-use-each-component) · [Pipeline](#pipeline) · [Results](#results) · [API](#api) · [Project structure](#project-structure)
 
 ---
 
@@ -56,6 +56,25 @@ Or with pip: `pip install -e .` (see `pyproject.toml` for dependencies). 3. **Do
 
 1. **Optional:** Create a `.env` file in the project root with `HF_TOKEN=...` if you use private Hugging Face models or datasets.
 2. **Verify:** Run data prep (see Pipeline below); it will fail with a clear error if any CSV is missing or misnamed.
+
+---
+
+## How to use each component
+
+| Component | Command / Usage | When to use |
+| --------- | --------------- | ----------- |
+| **Data prep** | `uv run python -m src.data.prepare_instacart_sbert` | First step: build train/eval datasets from raw CSVs |
+| **Train** | `uv run python -m src.train.train_sbert --lr 1e-4` | Train the two-tower SBERT model |
+| **CLI inference** | `uv run python -m src.inference --top-k 10` | One-off recommendations from command line |
+| **HTTP API** | `uv run uvicorn src.api.main:app --port 8000` | Serve recommendations as a REST API |
+| **Baselines** | `uv run python -m src.baselines --processed-dir processed/p5_mp20_ef0.1` | Compare SBERT vs content-based and CF |
+| **Compare untrained vs trained** | `uv run python scripts/compare_untrained_vs_trained.py` | Check for embedding collapse; compare metrics |
+| **Feedback analytics** | `uv run python scripts/feedback_analytics.py` | CTR, add-to-cart rate, purchase rate from feedback |
+| **Generate sample feedback** | `uv run python scripts/generate_sample_feedback.py` | Send recommend + feedback requests to API (run feedback_analytics separately for reports) |
+| **API tests** | `uv run pytest tests/ -v` | Run API tests (mocked recommender) |
+| **Docker** | `docker build -t instacart-rec-api .` then `docker run ...` | Containerized deployment |
+
+**Typical workflow:** 1) Prepare → 2) Train → 3) Serve (CLI or API) → 4) Collect feedback via API → 5) Run feedback analytics.
 
 ---
 
@@ -275,25 +294,6 @@ You can also pass any custom context with `--query "..."`. Scores are **cosine s
 
 ---
 
-## Project structure
-
-| Path                                       | Description                                                                                                                                                                                                                                       |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **data/**                                  | Raw Instacart CSVs (not in repo; user downloads from Kaggle).                                                                                                                                                                                     |
-| **processed/** (param subdirs)             | Data prep output: `train_dataset/`, `eval_dataset/`, `eval_queries.json`, `eval_corpus.json`, `eval_relevant_docs.json`, `data_prep_params.json`.                                                                                                 |
-| **models/two_tower_sbert/**                | Training checkpoints (e.g. `checkpoint-58419/`) and `final/` (best by NDCG@10 when IR eval is on).                                                                                                                                                |
-| **src/constants.py**                       | `PROJECT_ROOT`, `DEFAULT_DATA_DIR`, `DEFAULT_PROCESSED_DIR`, `DEFAULT_OUTPUT_DIR`, `DEFAULT_MODEL_DIR`, `DEFAULT_CORPUS_PATH`.                                                                                                                    |
-| **src/utils.py**                           | `setup_colored_logging()`, `resolve_processed_dir()` (auto-resolve processed dir to a param subdir when needed).                                                                                                                                  |
-| **src/data/prepare_instacart_sbert.py**    | Builds (anchor, positive) pairs from CSVs, splits train/eval by order, writes Datasets and IR artifacts.                                                                                                                                          |
-| **src/train/train_sbert.py**               | Loads processed data, builds Sentence Transformer + MultipleNegativesRankingLoss, runs trainer with optional InformationRetrievalEvaluator.                                                                                                       |
-| **src/inference/serve_recommendations.py** | Embedding-based serve: loads model and corpus, caches product embeddings on disk (and in-session); encodes query, returns top-k by cosine similarity. CLI via `python -m src.inference`; API: `load_recommender()`, `Recommender`, `recommend()`. |
-| **src/api/**                               | FastAPI service: `main.py` (app, health, ready), `routes/recommend.py`, `routes/feedback.py`, `schemas.py`, `feedback_store.py`. Run: `uvicorn src.api.main:app`.                                                                              |
-| **src/baselines/**                         | Content-based (untrained SBERT) and CF (item-item) baselines; same eval and metrics as SBERT. Run: `python -m src.baselines`.                                                                                                                     |
-| **notebooks/**                             | Jupyter notebooks for data prep, training, serve, and baselines (mirror the scripts for interactive use).                                                                                                                                        |
-| **pyproject.toml**, **uv.lock**            | Project and dependency lock (uv).                                                                                                                                                                                                                 |
-
----
-
 ## API
 
 The recommender is exposed as a **FastAPI** HTTP service with recommendation and feedback endpoints. Interactive docs are available at `/docs` (Swagger UI) and `/redoc` when the server is running.
@@ -316,6 +316,8 @@ Then open [http://localhost:8000/docs](http://localhost:8000/docs) for interacti
 | `CORPUS_PATH`      | Path to the product corpus JSON (default: `processed/.../eval_corpus.json`)  |
 | `FEEDBACK_DB_PATH` | Path to the SQLite database for feedback events (default: `data/feedback.db`) |
 | `INFERENCE_DEVICE` | Device for model inference: `cuda`, `mps` (Apple Silicon), or `cpu` (default: auto-detect) |
+| `API_KEY`          | When set, require API key on `/recommend` and `/feedback` (X-API-Key or Authorization: Bearer) |
+| `RATE_LIMIT`       | Rate limit per IP (default: `100/minute`). Health, ready, and metrics are exempt. |
 
 ### Endpoints
 
@@ -323,8 +325,9 @@ Then open [http://localhost:8000/docs](http://localhost:8000/docs) for interacti
 | ------ | ------------ | ------------------------------------------------ |
 | `POST` | `/recommend` | Get top-k product recommendations                |
 | `POST` | `/feedback`  | Record feedback events (impression, click, etc.)  |
-| `GET`  | `/health`    | Liveness probe                                   |
+| `GET`  | `/health`    | Liveness probe (exempt from rate limit)          |
 | `GET`  | `/ready`     | Readiness probe (model and corpus loaded)        |
+| `GET`  | `/metrics`   | Prometheus metrics (scrape for Grafana, alerting) |
 
 ### POST /recommend
 
@@ -402,6 +405,93 @@ Events are stored in SQLite (`feedback_events` table) with indices on `request_i
 - `X-Request-ID` header on all responses for tracing
 - `GET /health` → `{ "status": "ok" }`
 - `GET /ready` → `{ "status": "ready" }` once model and corpus are loaded
+
+### Docker
+
+Build and run with Docker (mount models, processed, and data at runtime):
+
+```bash
+docker build -t instacart-rec-api .
+docker run -p 8000:8000 \
+  -v $(pwd)/models:/app/models \
+  -v $(pwd)/processed:/app/processed \
+  -v $(pwd)/data:/app/data \
+  -e MODEL_DIR=/app/models/two_tower_sbert/final \
+  -e CORPUS_PATH=/app/processed/p5_mp20_ef0.1/eval_corpus.json \
+  instacart-rec-api
+```
+
+### Feedback analytics
+
+Compute CTR, add-to-cart rate, and purchase rate from stored feedback events. Per-request funnels are sorted by conversion depth (purchases first) so full-funnel examples appear at the top:
+
+```bash
+uv run python scripts/feedback_analytics.py
+uv run python scripts/feedback_analytics.py --db-path data/feedback.db --since 2025-01-01 --show-funnel-sample 5
+```
+
+| Flag | Description |
+| ---- | ----------- |
+| `--db-path` | Feedback DB path (default: `FEEDBACK_DB_PATH` or `data/feedback.db`) |
+| `--since` | Only include events on or after this date (ISO format) |
+| `--show-funnel-sample` | Number of per-request funnels to print (0 to disable) |
+
+### Generate sample feedback
+
+Send a stream of `POST /recommend` and `POST /feedback` requests to the API. Uses probabilistic conversion (each impression/click/add-to-cart independently converts with the given rate), producing varied funnel outcomes per request. Run `feedback_analytics.py` separately for reports:
+
+```bash
+# Start the API first (e.g. uvicorn src.api.main:app --port 8000)
+uv run python scripts/generate_sample_feedback.py
+uv run python scripts/generate_sample_feedback.py --num-requests 200 --top-k 20
+```
+
+| Flag | Description |
+| ---- | ----------- |
+| `--url` | API base URL (default: `http://localhost:8000`) |
+| `--num-requests` | Number of recommend requests to send (default: 20) |
+| `--top-k` | Number of products per recommendation (default: 10) |
+| `--click-rate` | Fraction of impressions → clicks (default: 0.15) |
+| `--atc-rate` | Fraction of clicks → add-to-cart (default: 0.4) |
+| `--purchase-rate` | Fraction of add-to-cart → purchase (default: 0.6) |
+| `--api-key` | API key when `API_KEY` is set (optional) |
+
+### Compare untrained vs trained
+
+Check for embedding collapse and compare metrics between frozen pretrained and your fine-tuned model:
+
+```bash
+uv run python scripts/compare_untrained_vs_trained.py
+uv run python scripts/compare_untrained_vs_trained.py --processed-dir processed/p5_mp20_ef0.1 --model-dir models/two_tower_sbert/final --sample-queries 1000
+```
+
+| Flag | Description |
+| ---- | ----------- |
+| `--processed-dir` | Processed data dir (default: auto-resolve) |
+| `--model-dir` | Trained model checkpoint path |
+| `--base-model` | Pretrained model name (must match training base) |
+| `--sample-queries` | Use random subset of eval queries for faster run |
+
+---
+
+## Project structure
+
+| Path                                       | Description                                                                                                                                                                                                                                       |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **data/**                                  | Raw Instacart CSVs (not in repo; user downloads from Kaggle).                                                                                                                                                                                     |
+| **processed/** (param subdirs)             | Data prep output: `train_dataset/`, `eval_dataset/`, `eval_queries.json`, `eval_corpus.json`, `eval_relevant_docs.json`, `data_prep_params.json`.                                                                                                 |
+| **models/two_tower_sbert/**                | Training checkpoints (e.g. `checkpoint-58419/`) and `final/` (best by NDCG@10 when IR eval is on).                                                                                                                                                |
+| **src/constants.py**                       | `PROJECT_ROOT`, `DEFAULT_DATA_DIR`, `DEFAULT_PROCESSED_DIR`, `DEFAULT_OUTPUT_DIR`, `DEFAULT_MODEL_DIR`, `DEFAULT_CORPUS_PATH`.                                                                                                                    |
+| **src/utils.py**                           | `setup_colored_logging()`, `resolve_processed_dir()` (auto-resolve processed dir to a param subdir when needed).                                                                                                                                  |
+| **src/data/prepare_instacart_sbert.py**    | Builds (anchor, positive) pairs from CSVs, splits train/eval by order, writes Datasets and IR artifacts.                                                                                                                                          |
+| **src/train/train_sbert.py**               | Loads processed data, builds Sentence Transformer + MultipleNegativesRankingLoss, runs trainer with optional InformationRetrievalEvaluator.                                                                                                       |
+| **src/inference/serve_recommendations.py** | Embedding-based serve: loads model and corpus, caches product embeddings on disk (and in-session); encodes query, returns top-k by cosine similarity. CLI via `python -m src.inference`; API: `load_recommender()`, `Recommender`, `recommend()`. |
+| **src/api/**                               | FastAPI service: `main.py`, `routes/`, `schemas.py`, `feedback_store.py`, `auth.py`, `metrics.py`. Run: `uvicorn src.api.main:app`.                                                                                                              |
+| **tests/**                                 | API tests: `pytest tests/`. Mock recommender to avoid loading model in CI.                                                                                                                                                                        |
+| **scripts/**                               | `feedback_analytics.py` (CTR, funnel), `generate_sample_feedback.py`, `compare_untrained_vs_trained.py`.                                                                                                                                            |
+| **src/baselines/**                         | Content-based (untrained SBERT) and CF (item-item) baselines; same eval and metrics as SBERT. Run: `python -m src.baselines`.                                                                                                                     |
+| **notebooks/**                             | Jupyter notebooks for data prep, training, serve, and baselines (mirror the scripts for interactive use).                                                                                                                                        |
+| **pyproject.toml**, **uv.lock**            | Project and dependency lock (uv).                                                                                                                                                                                                                 |
 
 ---
 

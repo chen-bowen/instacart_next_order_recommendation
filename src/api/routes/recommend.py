@@ -1,18 +1,32 @@
+"""
+Recommendation endpoint: POST /recommend.
+
+Returns top-k product recommendations for a user context. Instrumented with
+Prometheus metrics for latency and request counts.
+"""
+
 from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from src.api.auth import verify_api_key
+from src.api.metrics import (
+    RECOMMENDATION_ENCODE_SECONDS,
+    RECOMMENDATION_LATENCY_SECONDS,
+    RECOMMENDATION_REQUESTS_TOTAL,
+)
 from src.api.schemas import (
     RecommendationItem,
     RecommendationRequest,
     RecommendationResponse,
-    RecommendationStats,
+    InferenceStatistics,
 )
 from src.inference.serve_recommendations import (
     MonitoredRecommender,
@@ -64,65 +78,82 @@ async def recommend_endpoint(
     payload: RecommendationRequest,
     request: Request,
     recommender: Recommender = Depends(get_recommender),
+    _: None = Depends(verify_api_key),
 ) -> RecommendationResponse:
-    # Resolve user context string
-    context = payload.user_context
-    if context is None and payload.user_id is not None:
-        corpus_path: Path = getattr(request.app.state, "corpus_path", None) or recommender.corpus_path
-        eval_queries = _load_eval_queries(Path(corpus_path))
-        context = eval_queries.get(str(payload.user_id))
-    if not context:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Either user_context or a resolvable user_id must be provided.",
+    """Get top-k product recommendations. Records Prometheus metrics on success/error."""
+    start_time = time.perf_counter()
+    try:
+        # Resolve user context string
+        context = payload.user_context
+        if context is None and payload.user_id is not None:
+            corpus_path: Path = getattr(request.app.state, "corpus_path", None) or recommender.corpus_path
+            eval_queries = _load_eval_queries(Path(corpus_path))
+            context = eval_queries.get(str(payload.user_id))
+        if not context:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Either user_context or a resolvable user_id must be provided.",
+            )
+
+        # Generate request_id that clients can reuse when sending feedback.
+        request_id = str(uuid4())
+        exclude_ids = set(payload.exclude_product_ids or [])
+        user_id_str = str(payload.user_id) if payload.user_id is not None else None
+
+        # MonitoredRecommender accepts user_id and sets _last_metrics; plain Recommender ignores user_id
+        if isinstance(recommender, MonitoredRecommender):
+            results = recommender.recommend(
+                query=context,
+                top_k=payload.top_k,
+                user_id=user_id_str,
+                exclude_product_ids=exclude_ids,
+            )
+        else:
+            results = recommender.recommend(
+                query=context,
+                top_k=payload.top_k,
+                exclude_product_ids=exclude_ids,
+            )
+
+        items = [
+            RecommendationItem(
+                product_id=pid,
+                score=score,
+                product_text=recommender.pid_to_text.get(pid),
+            )
+            for pid, score in results
+        ]
+
+        stats = None
+        if isinstance(recommender, MonitoredRecommender) and recommender._last_metrics is not None:
+            m = recommender._last_metrics
+            stats = InferenceStatistics(
+                total_latency_ms=m.total_latency_ms,
+                query_embedding_time_ms=m.query_embedding_time_ms,
+                similarity_compute_time_ms=m.similarity_compute_time_ms,
+                num_recommendations=m.num_recommendations,
+                top_score=m.top_score,
+                avg_score=m.avg_score,
+                timestamp=m.timestamp,
+            )
+            # Record encode time for Prometheus (model forward pass)
+            RECOMMENDATION_ENCODE_SECONDS.observe(m.query_embedding_time_ms / 1000.0)
+
+        elapsed = time.perf_counter() - start_time
+        RECOMMENDATION_LATENCY_SECONDS.observe(elapsed)
+        RECOMMENDATION_REQUESTS_TOTAL.labels(status="success").inc()
+
+        logger.info(
+            "recommendation_served request_id=%s top_k=%d",
+            request_id,
+            len(items),
         )
-
-    # Generate request_id that clients can reuse when sending feedback.
-    request_id = str(uuid4())
-    exclude_ids = set(payload.exclude_product_ids or [])
-    user_id_str = str(payload.user_id) if payload.user_id is not None else None
-
-    # MonitoredRecommender accepts user_id and sets _last_metrics; plain Recommender ignores user_id
-    if isinstance(recommender, MonitoredRecommender):
-        results = recommender.recommend(
-            query=context,
-            top_k=payload.top_k,
-            user_id=user_id_str,
-            exclude_product_ids=exclude_ids,
-        )
-    else:
-        results = recommender.recommend(
-            query=context,
-            top_k=payload.top_k,
-            exclude_product_ids=exclude_ids,
-        )
-
-    items = [
-        RecommendationItem(
-            product_id=pid,
-            score=score,
-            product_text=recommender.pid_to_text.get(pid),
-        )
-        for pid, score in results
-    ]
-
-    stats = None
-    if isinstance(recommender, MonitoredRecommender) and recommender._last_metrics is not None:
-        m = recommender._last_metrics
-        stats = RecommendationStats(
-            total_latency_ms=m.total_latency_ms,
-            query_embedding_time_ms=m.query_embedding_time_ms,
-            similarity_compute_time_ms=m.similarity_compute_time_ms,
-            num_recommendations=m.num_recommendations,
-            top_score=m.top_score,
-            avg_score=m.avg_score,
-            timestamp=m.timestamp,
-        )
-
-    logger.info(
-        "recommendation_served request_id=%s top_k=%d",
-        request_id,
-        len(items),
-    )
-    return RecommendationResponse(request_id=request_id, recommendations=items, stats=stats)
-
+        return RecommendationResponse(request_id=request_id, recommendations=items, stats=stats)
+    except HTTPException:
+        # Client errors (e.g. 400) — count as error, re-raise for FastAPI
+        RECOMMENDATION_REQUESTS_TOTAL.labels(status="error").inc()
+        raise
+    except Exception:
+        # Server errors — count as error, re-raise
+        RECOMMENDATION_REQUESTS_TOTAL.labels(status="error").inc()
+        raise

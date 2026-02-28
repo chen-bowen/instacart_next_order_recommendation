@@ -1,11 +1,21 @@
+"""
+Feedback endpoint: POST /feedback.
+
+Ingests impression, click, add_to_cart, purchase events. Instrumented with
+Prometheus metrics for event counts and ingest latency.
+"""
+
 from __future__ import annotations
 
 import logging
+import time
 from typing import List
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from src.api.auth import verify_api_key
 from src.api.feedback_store import FeedbackEventRecord, record_event, record_events
+from src.api.metrics import FEEDBACK_EVENTS_TOTAL, FEEDBACK_INGEST_LATENCY_SECONDS
 from src.api.schemas import FeedbackBatchRequest, FeedbackEvent
 
 logger = logging.getLogger(__name__)
@@ -17,7 +27,10 @@ router = APIRouter()
     "/feedback",
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def feedback_endpoint(payload: FeedbackBatchRequest | FeedbackEvent) -> dict:
+async def feedback_endpoint(
+    payload: FeedbackBatchRequest | FeedbackEvent,
+    _: None = Depends(verify_api_key),
+) -> dict:
     """
     Ingest feedback events (impression, click, add_to_cart, purchase).
 
@@ -48,10 +61,17 @@ async def feedback_endpoint(payload: FeedbackBatchRequest | FeedbackEvent) -> di
         for e in events
     ]
 
+    start_time = time.perf_counter()
     if len(records) == 1:
         record_event(records[0])
     else:
         record_events(records)
+    elapsed = time.perf_counter() - start_time
+
+    # Record per-event-type counts for Prometheus
+    for r in records:
+        FEEDBACK_EVENTS_TOTAL.labels(event_type=r.event_type).inc()
+    FEEDBACK_INGEST_LATENCY_SECONDS.observe(elapsed)
 
     logger.info(
         "feedback_ingested count=%d types=%s",

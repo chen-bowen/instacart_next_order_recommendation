@@ -1,0 +1,29 @@
+# Exclude files not needed in the Docker build context.
+# Reduces image size and build time.
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.egg-info/
+.eggs/
+dist/
+build/
+.git/
+.gitignore
+.env
+.env.*
+*.md
+.cursor/
+.idea/
+.DS_Store
+*.log
+.cache/
+*.ipynb
+.ipynb_checkpoints/
+
+# Large data dirs - mount at runtime instead of copying
+/data/
+/processed/
+/models/
+.embedding_index/

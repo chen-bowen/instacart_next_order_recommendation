@@ -111,9 +111,7 @@ def _embedding_collapse_metrics(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Compare untrained vs trained SBERT; report IR metrics and collapse indicators"
-    )
+    parser = argparse.ArgumentParser(description="Compare untrained vs trained SBERT; report IR metrics and collapse indicators")
     parser.add_argument(
         "--processed-dir",
         type=Path,
@@ -165,9 +163,7 @@ def main() -> None:
     logger.info("Loading untrained model: %s", args.base_model)
     untrained_model = SentenceTransformer(args.base_model)
     logger.info("Ranking with untrained model...")
-    untrained_rankings, q_emb_u, c_emb_u = _rank_all(
-        untrained_model, eval_queries, eval_corpus, batch_size=args.batch_size
-    )
+    untrained_rankings, q_emb_u, c_emb_u = _rank_all(untrained_model, eval_queries, eval_corpus, batch_size=args.batch_size)
     untrained_metrics = compute_ir_metrics(untrained_rankings, eval_relevant_docs)
     collapse_u = _embedding_collapse_metrics(q_emb_u, c_emb_u, "untrained")
 
@@ -177,20 +173,17 @@ def main() -> None:
         logger.error("Trained model dir not found: %s", model_path)
         return
     logger.info("Loading trained model: %s", model_path)
+
     trained_model = SentenceTransformer(str(model_path))
     logger.info("Ranking with trained model...")
-    trained_rankings, q_emb_t, c_emb_t = _rank_all(
-        trained_model, eval_queries, eval_corpus, batch_size=args.batch_size
-    )
+    trained_rankings, q_emb_t, c_emb_t = _rank_all(trained_model, eval_queries, eval_corpus, batch_size=args.batch_size)
     trained_metrics = compute_ir_metrics(trained_rankings, eval_relevant_docs)
     collapse_t = _embedding_collapse_metrics(q_emb_t, c_emb_t, "trained")
 
     # ---- Report ----
     def print_metrics(label: str, m: dict[str, float]) -> None:
         print(f"\n--- {label} ---")
-        print(
-            f"  Accuracy@1:   {m['accuracy_at_1']:.4f}  |  Accuracy@10: {m['accuracy_at_10']:.4f}"
-        )
+        print(f"  Accuracy@1:   {m['accuracy_at_1']:.4f}  |  Accuracy@10: {m['accuracy_at_10']:.4f}")
         print(f"  Recall@10:   {m['recall_at_10']:.4f}  |  MRR@10:      {m['mrr_at_10']:.4f}")
         print(f"  NDCG@10:     {m['ndcg_at_10']:.4f}  |  MAP@100:     {m['map_at_100']:.4f}")
 

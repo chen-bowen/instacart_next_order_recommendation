@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 class RecommendationRequest(BaseModel):
     user_context: Optional[str] = Field(
         default=None,
+        max_length=10_000,
         description="Full user context string, e.g. '[+7d w4h14] Organic Milk, Whole Wheat Bread.'",
     )
     user_id: Optional[str] = Field(
@@ -28,7 +29,7 @@ class RecommendationItem(BaseModel):
     product_text: Optional[str] = None
 
 
-class RecommendationStats(BaseModel):
+class InferenceStatistics(BaseModel):
     """Per-request metrics returned with recommendations."""
 
     total_latency_ms: float
@@ -43,7 +44,7 @@ class RecommendationStats(BaseModel):
 class RecommendationResponse(BaseModel):
     request_id: str
     recommendations: List[RecommendationItem]
-    stats: Optional[RecommendationStats] = None
+    stats: Optional[InferenceStatistics] = None
 
 
 EventType = Literal["impression", "click", "add_to_cart", "purchase"]
@@ -65,4 +66,3 @@ class FeedbackBatchRequest(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = "ok"
-
