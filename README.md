@@ -58,60 +58,6 @@ Or with pip: `pip install -e .` (see `pyproject.toml` for dependencies). 3. **Do
 
 ---
 
-## Sharing trained models
-
-Trained model files live under `models/two_tower_sbert/` and are ignored by Git (see `.gitignore`). To share them alongside the code you can use either of the following.
-
-### Option A: Git LFS (files in the same repo)
-
-Store model files in the repo via [Git LFS](https://git-lfs.com/) so that anyone who clones also gets the model (after pulling LFS objects).
-
-1. **One-time setup** (if you don’t have LFS yet):
-
-   ```bash
-   git lfs install
-   ```
-
-2. **Track the model directory** and commit:
-
-   - Remove the `/models/` line from `.gitignore` (or replace it with a negation so only the dirs you want are tracked).
-   - Then:
-
-   ```bash
-   git lfs track "models/**"
-   git add .gitattributes models/
-   git commit -m "Add trained model via LFS"
-   git push
-   ```
-
-3. **Others:** After cloning, run `git lfs pull` to download the actual model files.
-
-### Option B: Hugging Face Hub (share one link)
-
-Push the trained model to the [Hugging Face Hub](https://huggingface.co/) so others can load it by model ID (no need to clone large files).
-
-1. **Upload once** (from the repo root):
-
-   ```bash
-   uv run python scripts/upload_model_to_hf.py --repo-id YOUR_USERNAME/instacart-two-tower-sbert
-   ```
-
-   Use a Hugging Face token: `huggingface-cli login` or set `HF_TOKEN` in `.env`. The script uploads the contents of `models/two_tower_sbert/final/`.
-
-2. **Document the model ID** in this README or in your deployment config, e.g. `YOUR_USERNAME/instacart-two-tower-sbert`.
-
-3. **If you don't want to train from scratch:** You can use the published model directly. Clone this repo, install deps (`uv sync`), and have a product corpus (run data prep to get `processed/.../eval_corpus.json`, or use your own JSON `{product_id: "Product: ... Aisle: ... Department: ..."}`). The model weights are loaded from the Hub at runtime—no need to download them separately.
-
-   - **CLI:**  
-     `uv run python -m src.inference --model-dir chenbowen184/instacart-two-tower-sbert --corpus processed/p5_mp20_ef0.1/eval_corpus.json --top-k 10`
-   - **API:**  
-     `MODEL_DIR=chenbowen184/instacart-two-tower-sbert uvicorn src.api.main:app --port 8000`  
-     Then `POST /recommend` with `user_context` or `user_id` (see [API](#api)).
-
-   Replace `chenbowen184/instacart-two-tower-sbert` with the model ID you published. No code changes are required; the app accepts a Hugging Face model ID in place of a local path.
-
----
-
 ## How to use each component
 
 | Component                        | Command / Usage                                                          | When to use                                                                               |
@@ -174,11 +120,13 @@ Loads the processed dir (auto-resolves to a single param subdir under `processed
 
 **Key flags:** `--processed-dir`, `--output-dir`, `--lr`, `--epochs`, `--train-batch-size`, `--max-seq-length`, `--no-information-retrieval-evaluator` (faster runs, no IR metrics).
 
-### 3. Serve
+### 3. Serve (via CLI or FastAPI)
 
-Loads the trained model from `final/` (or a checkpoint dir) and the product corpus from a JSON file. **Inference is embedding-based** (no text generation): the same SentenceTransformer encodes the user context and each product; recommendations are the **top-k** products by cosine similarity between query and product embeddings. Product embeddings are **cached on disk** (under `<corpus_parent>/.embedding_index/`) so later runs reuse them; use `--no-index` to disable. Within the same process, repeated `load_recommender()` with the same model and corpus returns the same instance (session cache), so the index is not reloaded. Run via CLI (`python -m src.inference`) or the Python API (`load_recommender()`, `Recommender`, `recommend()`).
+Loads the trained model from either 1) `final/` (or a checkpoint dir) 2) huggingface public model via id chenbowen184/instacart-two-tower-sbert. Also load the product corpus from a JSON file (should be there once you run the data preparation script. Serving could be done via two different methods.
 
-**Key flags:** `--model-dir`, `--corpus`, `--query` (raw context string), `--eval-query-id` (use a query from `eval_queries.json` by order_id), `--top-k`, `--no-index` (disable load/save of product embedding cache).
+* **Inference via CLI**: Run via CLI (`python -m src.inference`) or the Python API (`load_recommender()`, `Recommender`, `recommend()`).
+* **Inference via FastAPI App**: Start the FastAPI server via `uv run uvicorn src.api.main:app --port 8000` and make curl requests to the server (sample curl requests see below)
+
 
 ### Commands
 
