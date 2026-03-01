@@ -100,12 +100,15 @@ Push the trained model to the [Hugging Face Hub](https://huggingface.co/) so oth
 
 2. **Document the model ID** in this README or in your deployment config, e.g. `YOUR_USERNAME/instacart-two-tower-sbert`.
 
-3. **Others:** Use the model without a local copy by pointing at the Hub:
+3. **If you don't want to train from scratch:** You can use the published model directly. Clone this repo, install deps (`uv sync`), and have a product corpus (run data prep to get `processed/.../eval_corpus.json`, or use your own JSON `{product_id: "Product: ... Aisle: ... Department: ..."}`). The model weights are loaded from the Hub at runtime—no need to download them separately.
 
-   - **CLI:** `uv run python -m src.inference --model-dir YOUR_USERNAME/instacart-two-tower-sbert --corpus processed/p5_mp20_ef0.1/eval_corpus.json`
-   - **API:** `MODEL_DIR=YOUR_USERNAME/instacart-two-tower-sbert uvicorn src.api.main:app --port 8000`
+   - **CLI:**  
+     `uv run python -m src.inference --model-dir chenbowen184/instacart-two-tower-sbert --corpus processed/p5_mp20_ef0.1/eval_corpus.json --top-k 10`
+   - **API:**  
+     `MODEL_DIR=chenbowen184/instacart-two-tower-sbert uvicorn src.api.main:app --port 8000`  
+     Then `POST /recommend` with `user_context` or `user_id` (see [API](#api)).
 
-   `SentenceTransformer` accepts both a local path and a Hub model ID, so no code changes are required.
+   Replace `chenbowen184/instacart-two-tower-sbert` with the model ID you published. No code changes are required; the app accepts a Hugging Face model ID in place of a local path.
 
 ---
 
