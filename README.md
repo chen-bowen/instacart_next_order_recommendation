@@ -8,11 +8,12 @@ See the the two blog posts for a deeper walkthrough [blog post part 1](https://m
 
 ---
 
-## What we are predicting
+## Prediction Problem
 
-- **Target:** For each user, we predict **which products are most likely to appear in their next order**. We do _not_ predict the exact next order (e.g. a single basket); we produce a **ranking over the full product catalog** so that items the user is likely to buy next appear at the top.
-- **Formally:** Given a user’s **prior order history** (products bought, order timing, gaps between orders), the model outputs a **score for every product** (or a **top-k list**). Products with higher scores are more likely to be in the user’s next basket. Evaluation uses standard retrieval metrics (Accuracy@k, MRR, NDCG, MAP) against the actual next-order products as relevance labels.
-- **No leakage:** The model never sees the next order at prediction time. Training uses (anchor = prior-only context, positive = one product from the next order); at serve and in evaluation, the query is the same prior-only context, so we simulate a realistic “what should we recommend _now_?” setting.
+- **Task:** Rank the catalog so products in the user’s _next_ order are at the top (see **What we are predicting** above).
+- **Input:** User context from _prior_ orders only: a single text string built from the last N prior orders (product names in sequence, optional timing like “ordered 7 days after previous on weekday 4 at hour 14”). No information from the “next” order is included at prediction time.
+- **Output:** A ranking over the full product catalog: each product gets a score (cosine similarity between the encoded context and the encoded product text). We return the top-k product IDs (and optionally scores).
+- **Train vs serve:** For **training**, each (anchor, positive) pair has anchor = prior-only context (and during data prep we can optionally include “Next: weekday X, hour Y, …” in the anchor for that target order). The **positive** is one product that actually appears in that order’s next basket. For **serve and evaluation**, the query is the _same_ prior-only context **without** the “Next: …” segment, so we never use future information and the setup matches production.
 
 ---
 
@@ -151,15 +152,15 @@ uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 ```
 
 ---
+## Training
 
-## Prediction problem
-
-- **Task:** Rank the catalog so products in the user’s _next_ order are at the top (see **What we are predicting** above).
-- **Input:** User context from _prior_ orders only: a single text string built from the last N prior orders (product names in sequence, optional timing like “ordered 7 days after previous on weekday 4 at hour 14”). No information from the “next” order is included at prediction time.
-- **Output:** A ranking over the full product catalog: each product gets a score (cosine similarity between the encoded context and the encoded product text). We return the top-k product IDs (and optionally scores).
-- **Train vs serve:** For **training**, each (anchor, positive) pair has anchor = prior-only context (and during data prep we can optionally include “Next: weekday X, hour Y, …” in the anchor for that target order). The **positive** is one product that actually appears in that order’s next basket. For **serve and evaluation**, the query is the _same_ prior-only context **without** the “Next: …” segment, so we never use future information and the setup matches production.
+- **Runtime:** Training is slow on CPU-only and on Apple Silicon (MPS): expect multiple hours for 5 epochs with ~1.2M pairs. Larger base models (e.g. `multi-qa-MiniLM-L6`) or longer `--max-seq-length` (e.g. 384 or 512) increase runtime and memory. Defaults (`all-MiniLM-L6-v2`, `max_seq_length` 256) are chosen for feasibility on a typical laptop or single GPU.
+- **Hyperparameters:** Default learning rate `1e-4` and batch size (e.g. 64 or 128) work for many runs. The trainer uses a linear LR schedule with 10% warmup. Checkpoints are written every epoch under `models/two_tower_sbert/`; when the IR evaluator is on, the best checkpoint by NDCG@10 is also written to `models/two_tower_sbert/final/`.
+- **Why ~1s+ per step (e.g. on Apple Silicon):** On MPS the code sets `dataloader_num_workers=0` and disables fp16 for stability. Data loading and tokenization run on the main thread, so the GPU often waits for the next batch and there is no prefetch. On **CUDA** you can pass `--dataloader-num-workers` (e.g. 4) for faster steps. With **dynamic padding** (pad to longest in batch), many steps are faster, but when the batch length (and thus tensor shape) changes, MPS may recompile and you can see occasional steps over 5s; **length bucketing** (fixed set of lengths) would limit recompilation to a few shapes.
+- **Gradient accumulation:** Not used; each step is one batch. You can simulate a larger batch by increasing `--train-batch-size` if memory allows.
 
 ---
+
 
 ## Results
 
@@ -171,7 +172,7 @@ uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 
 Train/eval are split **by order** so that all pairs from a given order are in one split; eval queries are the hold-out orders, and the corpus is the full product set (~50k). Each eval query has one or more relevant products (the products actually in that order’s next basket).
 
-### Example evaluation metrics
+### Evaluation Metrics
 
 Setup: `processed/p5_mp20_ef0.1`, base model `all-MiniLM-L6-v2`, `max_seq_length` 256, default batch size and learning rate (e.g. `--lr 1e-4`). Evaluation runs over ~13k eval queries and ~50k corpus via the built-in `InformationRetrievalEvaluator`.
 
@@ -227,7 +228,7 @@ Typical expectation: **SBERT (after 4–5 epochs) outperforms both** (e.g. Accur
 
 ---
 
-### Demo inference
+### Inference via CLI
 
 The serve script supports two ways to try it. **1. Built-in demo query** — Run without `--query` to use a **built-in demo query** that mimics a user who previously ordered “Organic Milk, Whole Wheat Bread” in a context where the last order was 7 days prior, on weekday 4 at hour 14. The format is:
 
@@ -255,47 +256,7 @@ Top-5 recommendations:
   5. product_id=16490 (score=0.6510) Product: Old Fashioned Whole Wheat Bread. Aisle: bread. Department: bakery.
 ```
 
-**2. Eval-query demo** — Use a real hold-out order from `eval_queries.json` and compare recommendations with that order's actual next basket:
-
-```bash
-uv run python -m src.inference --corpus processed/p5_mp20_ef0.1/eval_corpus.json --eval-query-id 3178496 --top-k 10
-```
-
-**Example output (query truncated, then top-10):**
-
-```
-Query (eval_id=3178496):
-  [+30d w5h23] Chicken Base, Organic, Lemonade, Black Bean Garlic Sauce; [+8d w6h1] Wild Sardines in Extra Virgin Olive Oil, Pulp Free Orange Juice, Organic Multigrain with Flax English Muffins, Organic...
-
-Top-10 recommendations:
-  1. product_id=22170 (score=0.6053) Product: Organic Multigrain with Flax English Muffins. Aisle: breakfast bakery. Department: bakery.
-  2. product_id=34044 (score=0.5992) Product: Organic Orange Juice with Pulp. Aisle: refrigerated. Department: beverages.
-  3. product_id=39108 (score=0.5956) Product: Pulp Free Orange Juice. Aisle: refrigerated. Department: beverages.
-  4. product_id=47731 (score=0.5768) Product: Pulp Free Orange Juice With Tangerine. Aisle: refrigerated. Department: beverages.
-  5. product_id=23034 (score=0.5758) Product: Juice, Original + Honey, Exposed, Pulp Free. Aisle: juice nectars. Department: beverages.
-  6. product_id=17326 (score=0.5720) Product: Natural Wild Caught Brisling Sardines in Extra Virgin Olive Oil. Aisle: canned meat seafood. Department: canned goods.
-  7. product_id=21683 (score=0.5675) Product: Organic Multigrain English Muffins. Aisle: buns rolls. Department: bakery.
-  8. product_id=12331 (score=0.5669) Product: Wild Sardines in Extra Virgin Olive Oil with Lemon. Aisle: canned meat seafood. Department: canned goods.
-  9. product_id=45079 (score=0.5666) Product: Blood Orange Lemonade. Aisle: juice nectars. Department: beverages.
-  10. product_id=3585 (score=0.5653) Product: Exposed Pulp and Juice Original Aloe Vera + Honey. Aisle: refrigerated. Department: beverages.
-```
-
-The script prints that order's full context (truncated above) and the top-k product IDs; check `eval_relevant_docs.json` for that order_id to see the ground-truth products for comparison.
-
-You can also pass any custom context with `--query "..."`. Scores are **cosine similarity** between the encoded query and each product embedding, in [0, 1] when embeddings are L2-normalized.
-
----
-
-## Training notes
-
-- **Runtime:** Training is slow on CPU-only and on Apple Silicon (MPS): expect multiple hours for 5 epochs with ~1.2M pairs. Larger base models (e.g. `multi-qa-MiniLM-L6`) or longer `--max-seq-length` (e.g. 384 or 512) increase runtime and memory. Defaults (`all-MiniLM-L6-v2`, `max_seq_length` 256) are chosen for feasibility on a typical laptop or single GPU.
-- **Hyperparameters:** Default learning rate `1e-4` and batch size (e.g. 64 or 128) work for many runs. The trainer uses a linear LR schedule with 10% warmup. Checkpoints are written every epoch under `models/two_tower_sbert/`; when the IR evaluator is on, the best checkpoint by NDCG@10 is also written to `models/two_tower_sbert/final/`.
-- **Why ~1s+ per step (e.g. on Apple Silicon):** On MPS the code sets `dataloader_num_workers=0` and disables fp16 for stability. Data loading and tokenization run on the main thread, so the GPU often waits for the next batch and there is no prefetch. On **CUDA** you can pass `--dataloader-num-workers` (e.g. 4) for faster steps. With **dynamic padding** (pad to longest in batch), many steps are faster, but when the batch length (and thus tensor shape) changes, MPS may recompile and you can see occasional steps over 5s; **length bucketing** (fixed set of lengths) would limit recompilation to a few shapes.
-- **Gradient accumulation:** Not used; each step is one batch. You can simulate a larger batch by increasing `--train-batch-size` if memory allows.
-
----
-
-## API
+## Inference via Servicing API
 
 The recommender is exposed as a **FastAPI** HTTP service with recommendation and feedback endpoints. Interactive docs are available at `/docs` (Swagger UI) and `/redoc` when the server is running.
 
