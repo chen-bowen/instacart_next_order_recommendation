@@ -21,7 +21,7 @@ def mock_recommender():
     """
     Create a mock MonitoredRecommender that returns fixed recommendations.
 
-    Mimics the interface of MonitoredRecommender: recommend(), pid_to_text, _last_metrics.
+    Mimics the interface of MonitoredRecommender: recommend(), pid_to_text, last_metrics.
     """
     mock = MagicMock()
     mock.recommend.return_value = [
@@ -35,7 +35,7 @@ def mock_recommender():
         "48628": "Product: Organic Whole Wheat Bread. Aisle: bread. Department: bakery.",
     }
     mock.corpus_path = Path("/tmp/test/corpus.json")
-    mock._last_metrics = RecommendationMetrics(
+    mock.last_metrics = RecommendationMetrics(
         user_id="test",
         query_embedding_time_ms=10.0,
         similarity_compute_time_ms=5.0,

@@ -245,7 +245,14 @@ def build_user_context_for_target_orders(
 def strip_next_order_from_context(context: str) -> str:
     """
     Remove the ' Next: ...' clause from a user context string.
-    Use this for eval/serve when we don't know the next order time (only past orders are known).
+
+    Use for eval/serve when we don't know the next order time (only past orders are known).
+
+    Args:
+        context: User context string that may end with " Next: ...".
+
+    Returns:
+        Context with the Next clause stripped.
     """
     if " Next:" in context:
         return context.split(" Next:")[0].strip()
@@ -301,7 +308,20 @@ def _params_subdir(
     sample_frac: float | None,
     max_target_orders: int | None,
 ) -> str:
-    """Build a short subdir name from data prep params so different settings get different folders."""
+    """
+    Build a short subdir name from data prep params so different settings get different folders.
+
+    Args:
+        max_prior_orders: Max prior orders per user.
+        max_product_names: Max product names in context.
+        eval_frac: Eval fraction.
+        eval_serve_time: Whether eval queries use serve-time format.
+        sample_frac: Optional train sample fraction.
+        max_target_orders: Optional max target orders.
+
+    Returns:
+        Subdir name (e.g. p5_mp20_ef0.1).
+    """
     parts = [
         f"p{max_prior_orders}",
         f"mp{max_product_names}",
@@ -333,16 +353,21 @@ def run(
     Loads CSVs, builds (anchor, positive) pairs, splits by order into train/eval,
     optionally samples the train set, and writes HuggingFace datasets plus
     eval_queries, eval_corpus, and eval_relevant_docs for InformationRetrievalEvaluator.
+    When eval_serve_time=True (default), eval_queries have " Next: ..." stripped.
 
-    When eval_serve_time=True (default), eval_queries have " Next: ..." stripped
-    so evaluation matches production (we don't know next order time at serve time).
+    Args:
+        data_dir: Path to data/ folder (CSVs).
+        output_dir: Path to save processed outputs.
+        max_prior_orders: Max history orders per user for context.
+        max_product_names: Max product names per context string.
+        sample_frac: Optional fraction to sample from train pairs.
+        eval_frac: Fraction of orders for eval set.
+        eval_serve_time: If True, strip " Next: ..." from eval queries.
+        max_target_orders: Optional cap on target orders.
+        seed: Random seed for sampling.
 
     Returns:
-        train_dataset: HuggingFace Dataset with columns "anchor", "positive".
-        eval_dataset: Eval Dataset (same format) or None if no eval pairs.
-        eval_queries: Dict qid (order_id as str) -> query text.
-        eval_corpus: Dict cid (product_id as str) -> document text.
-        eval_relevant_docs: Dict qid -> set of cid (product_ids in that eval order).
+        Tuple of (train_dataset, eval_dataset, eval_queries, eval_corpus, eval_relevant_docs).
     """
     # Ensure paths are Path objects. Write to a param-based subdir so different settings don't overwrite.
     data_dir = Path(data_dir)

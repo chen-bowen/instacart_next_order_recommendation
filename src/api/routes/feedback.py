@@ -35,6 +35,13 @@ async def feedback_endpoint(
     Ingest feedback events (impression, click, add_to_cart, purchase).
 
     Accepts either a single FeedbackEvent or a FeedbackBatchRequest with multiple events.
+
+    Args:
+        payload: FeedbackBatchRequest or single FeedbackEvent.
+        _: Injected API key verification.
+
+    Returns:
+        Dict with "status": "accepted" and "events_ingested": count.
     """
     events: List[FeedbackEvent]
     if isinstance(payload, FeedbackBatchRequest):

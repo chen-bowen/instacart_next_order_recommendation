@@ -9,7 +9,17 @@ from __future__ import annotations
 
 
 def _precision_at_k(relevant: set[str], ranked: list[str], k: int) -> float:
-    """Precision at k: fraction of top-k that are relevant."""
+    """
+    Precision at k: fraction of top-k that are relevant.
+
+    Args:
+        relevant: Set of relevant product IDs.
+        ranked: Ranked list of product IDs.
+        k: Cut-off position.
+
+    Returns:
+        Precision at k (0.0 to 1.0).
+    """
     if k <= 0:
         return 0.0
     top_k = ranked[:k]
@@ -18,7 +28,17 @@ def _precision_at_k(relevant: set[str], ranked: list[str], k: int) -> float:
 
 
 def _recall_at_k(relevant: set[str], ranked: list[str], k: int) -> float:
-    """Recall at k: fraction of relevant items found in top-k."""
+    """
+    Recall at k: fraction of relevant items found in top-k.
+
+    Args:
+        relevant: Set of relevant product IDs.
+        ranked: Ranked list of product IDs.
+        k: Cut-off position.
+
+    Returns:
+        Recall at k (0.0 to 1.0), or 0.0 if relevant is empty.
+    """
     if not relevant:
         return 0.0
     top_k = ranked[:k]
@@ -27,7 +47,17 @@ def _recall_at_k(relevant: set[str], ranked: list[str], k: int) -> float:
 
 
 def _average_precision(relevant: set[str], ranked: list[str], k: int | None = None) -> float:
-    """Average precision (for MAP): sum of P@j * rel(j) for j in 1..k, divided by min(|relevant|, k)."""
+    """
+    Average precision (for MAP): sum of P@j * rel(j) for j in 1..k, divided by min(|relevant|, k).
+
+    Args:
+        relevant: Set of relevant product IDs.
+        ranked: Ranked list of product IDs.
+        k: Optional cut-off; uses full list if None.
+
+    Returns:
+        Average precision (0.0 to 1.0), or 0.0 if relevant is empty.
+    """
     if not relevant:
         return 0.0
     if k is not None:
@@ -42,7 +72,17 @@ def _average_precision(relevant: set[str], ranked: list[str], k: int | None = No
 
 
 def _reciprocal_rank(relevant: set[str], ranked: list[str], k: int) -> float:
-    """Reciprocal rank of first relevant item in top-k (0 if none)."""
+    """
+    Reciprocal rank of first relevant item in top-k (0 if none).
+
+    Args:
+        relevant: Set of relevant product IDs.
+        ranked: Ranked list of product IDs.
+        k: Cut-off position.
+
+    Returns:
+        1/j where j is position of first relevant item, or 0.0.
+    """
     for j, pid in enumerate(ranked[:k], start=1):
         if pid in relevant:
             return 1.0 / j
@@ -50,7 +90,17 @@ def _reciprocal_rank(relevant: set[str], ranked: list[str], k: int) -> float:
 
 
 def _ndcg_at_k(relevant: set[str], ranked: list[str], k: int) -> float:
-    """NDCG@k: DCG / IDCG. Relevance is binary (1 if in relevant, 0 else)."""
+    """
+    NDCG@k: DCG / IDCG. Relevance is binary (1 if in relevant, 0 else).
+
+    Args:
+        relevant: Set of relevant product IDs.
+        ranked: Ranked list of product IDs.
+        k: Cut-off position.
+
+    Returns:
+        NDCG at k (0.0 to 1.0).
+    """
     def dcg(rel_list: list[float]) -> float:
         return sum(r / __lg(i + 2) for i, r in enumerate(rel_list))
 
@@ -76,8 +126,8 @@ def compute_ir_metrics(
     Compute IR metrics over all queries.
 
     Args:
-        query_rankings: query_id -> list of product_id (ranked by score desc).
-        relevant_docs: query_id -> set of relevant product_id.
+        query_rankings: Dict mapping query_id to list of product_id (ranked by score desc).
+        relevant_docs: Dict mapping query_id to set of relevant product_id.
 
     Returns:
         Dict with keys: accuracy_at_1, accuracy_at_3, accuracy_at_5, accuracy_at_10,

@@ -17,7 +17,15 @@ from tqdm import tqdm
 
 
 def load_eval_data(processed_dir: Path) -> tuple[dict[str, str], dict[str, str], dict[str, set[str]]]:
-    """Load eval_queries, eval_corpus, eval_relevant_docs from a processed dir."""
+    """
+    Load eval_queries, eval_corpus, eval_relevant_docs from a processed dir.
+
+    Args:
+        processed_dir: Path to the processed directory (e.g. processed/p5_mp20_ef0.1).
+
+    Returns:
+        Tuple of (eval_queries, eval_corpus, eval_relevant_docs).
+    """
     with open(processed_dir / "eval_queries.json") as f:
         eval_queries = json.load(f)
     with open(processed_dir / "eval_corpus.json") as f:
@@ -31,6 +39,7 @@ def load_eval_data(processed_dir: Path) -> tuple[dict[str, str], dict[str, str],
 class ItemItemCFBaseline:
     """
     Item-item CF: score(candidate) = sum over prior products h of co_occur(candidate, h).
+
     Co-occurrence = number of orders containing both products (from order_products__prior).
     """
 
@@ -117,7 +126,15 @@ class ItemItemCFBaseline:
         self.product_ids.update(self.corpus_ids)
 
     def rank_all(self, eval_query_ids: list[str] | None = None) -> dict[str, list[str]]:
-        """Return query_id (order_id) -> list of product_id ranked by CF score (desc)."""
+        """
+        Rank corpus for each eval query by CF score (descending).
+
+        Args:
+            eval_query_ids: Optional list of query IDs; defaults to all eval queries.
+
+        Returns:
+            Dict mapping query_id to list of product_id ranked by score descending.
+        """
         if eval_query_ids is None:
             eval_query_ids = list(self.eval_order_to_history.keys())
         out: dict[str, list[str]] = {}

@@ -43,8 +43,14 @@ def _load_eval_queries(corpus_path: Path) -> dict[str, str]:
     """
     Load eval_queries.json from the same directory as the corpus, if present.
 
-    This is primarily for demo / offline evaluation; in a production setting
-    a dedicated user-context service would supply the query string.
+    Primarily for demo / offline evaluation; in production a dedicated
+    user-context service would supply the query string.
+
+    Args:
+        corpus_path: Path to the corpus JSON (eval_queries.json is in same dir).
+
+    Returns:
+        Dict mapping query_id (order_id) to user context string, or empty dict.
     """
     queries_path = corpus_path.parent / "eval_queries.json"
     if not queries_path.exists():
@@ -60,6 +66,14 @@ def _load_eval_queries(corpus_path: Path) -> dict[str, str]:
 
 
 def get_recommender(request: Request) -> Recommender:
+    """FastAPI dependency that returns the app's recommender (loads on-demand if needed).
+
+    Args:
+        request: Request instance; uses request.app.state.recommender.
+
+    Returns:
+        Recommender instance.
+    """
     rec: Optional[Recommender] = getattr(request.app.state, "recommender", None)
     if rec is None:
         # As a fallback, try to load using default constants; readiness endpoint should catch this earlier.
@@ -80,7 +94,18 @@ async def recommend_endpoint(
     recommender: Recommender = Depends(get_recommender),
     _: None = Depends(verify_api_key),
 ) -> RecommendationResponse:
-    """Get top-k product recommendations. Records Prometheus metrics on success/error."""
+    """
+    Get top-k product recommendations. Records Prometheus metrics on success/error.
+
+    Args:
+        payload: RecommendationRequest (user_context or user_id, top_k, etc.).
+        request: Request (for app state and corpus path).
+        recommender: Injected recommender dependency.
+        _: Injected API key verification.
+
+    Returns:
+        RecommendationResponse with request_id, recommendations, and optional stats.
+    """
     start_time = time.perf_counter()
     try:
         # Resolve user context string
@@ -100,7 +125,7 @@ async def recommend_endpoint(
         exclude_ids = set(payload.exclude_product_ids or [])
         user_id_str = str(payload.user_id) if payload.user_id is not None else None
 
-        # MonitoredRecommender accepts user_id and sets _last_metrics; plain Recommender ignores user_id
+        # MonitoredRecommender accepts user_id and sets last_metrics; plain Recommender ignores user_id
         if isinstance(recommender, MonitoredRecommender):
             results = recommender.recommend(
                 query=context,
@@ -125,8 +150,8 @@ async def recommend_endpoint(
         ]
 
         stats = None
-        if isinstance(recommender, MonitoredRecommender) and recommender._last_metrics is not None:
-            m = recommender._last_metrics
+        if isinstance(recommender, MonitoredRecommender) and recommender.last_metrics is not None:
+            m = recommender.last_metrics
             stats = InferenceStatistics(
                 total_latency_ms=m.total_latency_ms,
                 query_embedding_time_ms=m.query_embedding_time_ms,

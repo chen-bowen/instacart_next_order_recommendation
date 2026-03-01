@@ -34,8 +34,19 @@ def _rank_all(
     eval_queries: dict[str, str],
     eval_corpus: dict[str, str],
     batch_size: int = 64,
-) -> dict[str, list[str]]:
-    """Rank corpus by cosine similarity for each query; return query_id -> ranked product_ids."""
+) -> tuple[dict[str, list[str]], np.ndarray, np.ndarray]:
+    """
+    Rank corpus by cosine similarity for each query; return rankings and embeddings.
+
+    Args:
+        model: SentenceTransformer to encode query and corpus.
+        eval_queries: Dict mapping query_id to query text.
+        eval_corpus: Dict mapping product_id to document text.
+        batch_size: Encode batch size.
+
+    Returns:
+        Tuple of (query_id -> ranked product_ids, query_embeddings, corpus_embeddings).
+    """
     product_ids = list(eval_corpus.keys())
     corpus_texts = [eval_corpus[pid] for pid in product_ids]
 
@@ -76,7 +87,17 @@ def _embedding_collapse_metrics(
 ) -> dict[str, float]:
     """
     Simple collapse indicators: high mean pairwise cosine sim = less diversity (collapse).
-    Also report per-dimension std (low = dimensions unused).
+
+    Also reports per-dimension std (low = dimensions unused).
+
+    Args:
+        query_emb: Query embeddings (n_queries, dim).
+        corpus_emb: Corpus embeddings (n_corpus, dim).
+        name: Prefix for returned metric keys (e.g. "untrained").
+        sample_pairs: Number of random pairs to sample for mean cosine sim.
+
+    Returns:
+        Dict with keys {name}_query_mean_pairwise_cos_sim, {name}_corpus_*.
     """
     rng = random.Random(42)
     q_n, q_d = query_emb.shape

@@ -51,9 +51,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     Application lifespan handler.
 
-    On startup:
-      - Initialize the feedback SQLite database.
-      - Load the recommender model and corpus into memory.
+    On startup: initialize the feedback SQLite database and load the recommender
+    model and corpus into memory.
+
+    Args:
+        app: FastAPI application instance.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logger.info("Starting Instacart recommendation API service")
@@ -62,8 +64,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Initializing database")
     init_db()
 
-    # Load recommender model
-    model_dir = _resolve_model_dir().resolve()
+    # Load recommender model (model_dir can be a local path or a Hugging Face model ID)
+    model_dir = _resolve_model_dir()
     corpus_path = _resolve_corpus_path().resolve()
     logger.info("Loading recommender model_dir=%s corpus=%s", model_dir, corpus_path)
     recommender: MonitoredRecommender = load_monitored_recommender(
@@ -99,6 +101,13 @@ app.add_middleware(SlowAPIMiddleware)
 async def request_logging_middleware(request: Request, call_next):
     """
     Simple structured logging for incoming HTTP requests.
+
+    Args:
+        request: Incoming request.
+        call_next: Next middleware or route handler.
+
+    Returns:
+        Response from the next handler.
     """
     start = time.time()
     req_id = request.headers.get("X-Request-ID") or str(uuid4())

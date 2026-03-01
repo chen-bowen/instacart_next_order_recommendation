@@ -1,8 +1,8 @@
 # Instacart Next-Order Recommendation
 
-This project ranks products by likelihood of appearing in a user's next order. I built a two-tower Sentence-BERT model on the [Instacart dataset](https://www.kaggle.com/c/instacart-market-basket-analysis) (one tower for user context, one for product text), an end-to-end pipeline (data prep → train → serve), a FastAPI service with `/recommend` and `/feedback` endpoints, baselines (content-based SBERT, item-item CF), a feedback loop (SQLite storage, `feedback_analytics.py` for CTR/funnel metrics, `generate_sample_feedback.py` for sample data), production features (Prometheus, rate limiting, API key auth, Docker, MPS for Apple Silicon), and scripts to compare untrained vs trained and check for embedding collapse. 
+This project ranks products by likelihood of appearing in a user's next order. I built a two-tower Sentence-BERT model on the [Instacart dataset](https://www.kaggle.com/c/instacart-market-basket-analysis) (one tower for user context, one for product text), an end-to-end pipeline (data prep → train → serve), a FastAPI service with `/recommend` and `/feedback` endpoints, baselines (content-based SBERT, item-item CF), a feedback loop (SQLite storage, `feedback_analytics.py` for CTR/funnel metrics, `generate_sample_feedback.py` for sample data), production features (Prometheus, rate limiting, API key auth, Docker, MPS for Apple Silicon), and scripts to compare untrained vs trained and check for embedding collapse.
 
-See the [blog post](https://medium.com/@bowenchen/from-purchase-history-to-recommendations-a-two-tower-approach-to-rank-products-c624d8a6c024) for a deeper walkthrough.
+See the the two blog posts for a deeper walkthrough [blog post part 1](https://medium.com/@bowenchen/from-purchase-history-to-recommendations-a-two-tower-approach-to-rank-products-c624d8a6c024)
 
 **Contents:** [What we are predicting](#what-we-are-predicting) · [Requirements](#requirements) · [Setup](#setup) · [How to use each component](#how-to-use-each-component) · [Pipeline](#pipeline) · [Results](#results) · [API](#api) · [Project structure](#project-structure)
 
@@ -10,9 +10,9 @@ See the [blog post](https://medium.com/@bowenchen/from-purchase-history-to-recom
 
 ## What we are predicting
 
-- **Target:** For each user, we predict **which products are most likely to appear in their next order**. We do *not* predict the exact next order (e.g. a single basket); we produce a **ranking over the full product catalog** so that items the user is likely to buy next appear at the top.
+- **Target:** For each user, we predict **which products are most likely to appear in their next order**. We do _not_ predict the exact next order (e.g. a single basket); we produce a **ranking over the full product catalog** so that items the user is likely to buy next appear at the top.
 - **Formally:** Given a user’s **prior order history** (products bought, order timing, gaps between orders), the model outputs a **score for every product** (or a **top-k list**). Products with higher scores are more likely to be in the user’s next basket. Evaluation uses standard retrieval metrics (Accuracy@k, MRR, NDCG, MAP) against the actual next-order products as relevance labels.
-- **No leakage:** The model never sees the next order at prediction time. Training uses (anchor = prior-only context, positive = one product from the next order); at serve and in evaluation, the query is the same prior-only context, so we simulate a realistic “what should we recommend *now*?” setting.
+- **No leakage:** The model never sees the next order at prediction time. Training uses (anchor = prior-only context, positive = one product from the next order); at serve and in evaluation, the query is the same prior-only context, so we simulate a realistic “what should we recommend _now_?” setting.
 
 ---
 
@@ -20,7 +20,7 @@ See the [blog post](https://medium.com/@bowenchen/from-purchase-history-to-recom
 
 - **In-app “reorder” or “buy again”:** Surface a short list of products (“You might need these”) on the home screen or before checkout, ordered by the model’s scores. Users can one-tap add items they regularly buy.
 - **Email / push:** Trigger “Your usual items are back” or “Restock these?” campaigns using top-k recommendations per user, optionally filtered by category or recency.
-- **Cold start:** For users with few or no prior orders, the context can be minimal (e.g. first order only); the same pipeline still returns a ranking. You can combine with non-personalized fallbacks (trending, category) when context is too weak.
+- **Cold start:** For users with few or no prior orders, the context can be minimal (e.g. first order only); the same pipeline still returns a ranking. You can combine with non-personalized fallbacks (trending, category) when context is too weak. (In this project, we don't have rich user features hence this doesn't work very well)
 - **APIs and services:** Expose the recommender as a service: input = user context string (or user_id + lookup from your DB), output = top-k product IDs and scores. Other teams (search, ads, merchandising) can call it to personalize surfaces.
 - **Batch precompute:** Precompute top-k per user on a schedule (e.g. nightly), store in a key-value store or feature store, and serve from cache for low-latency UX while retraining the model periodically.
 - **A/B testing:** Run the two-tower model as one arm (e.g. “SBERT next-order”) vs rule-based or other models, and measure impact on add-to-cart, order size, or repeat purchase.
@@ -58,8 +58,58 @@ Or with pip: `pip install -e .` (see `pyproject.toml` for dependencies). 3. **Do
 
 ---
 
-## How to use each component
+## Sharing trained models
 
+Trained model files live under `models/two_tower_sbert/` and are ignored by Git (see `.gitignore`). To share them alongside the code you can use either of the following.
+
+### Option A: Git LFS (files in the same repo)
+
+Store model files in the repo via [Git LFS](https://git-lfs.com/) so that anyone who clones also gets the model (after pulling LFS objects).
+
+1. **One-time setup** (if you don’t have LFS yet):
+
+   ```bash
+   git lfs install
+   ```
+
+2. **Track the model directory** and commit:
+
+   - Remove the `/models/` line from `.gitignore` (or replace it with a negation so only the dirs you want are tracked).
+   - Then:
+
+   ```bash
+   git lfs track "models/**"
+   git add .gitattributes models/
+   git commit -m "Add trained model via LFS"
+   git push
+   ```
+
+3. **Others:** After cloning, run `git lfs pull` to download the actual model files.
+
+### Option B: Hugging Face Hub (share one link)
+
+Push the trained model to the [Hugging Face Hub](https://huggingface.co/) so others can load it by model ID (no need to clone large files).
+
+1. **Upload once** (from the repo root):
+
+   ```bash
+   uv run python scripts/upload_model_to_hf.py --repo-id YOUR_USERNAME/instacart-two-tower-sbert
+   ```
+
+   Use a Hugging Face token: `huggingface-cli login` or set `HF_TOKEN` in `.env`. The script uploads the contents of `models/two_tower_sbert/final/`.
+
+2. **Document the model ID** in this README or in your deployment config, e.g. `YOUR_USERNAME/instacart-two-tower-sbert`.
+
+3. **Others:** Use the model without a local copy by pointing at the Hub:
+
+   - **CLI:** `uv run python -m src.inference --model-dir YOUR_USERNAME/instacart-two-tower-sbert --corpus processed/p5_mp20_ef0.1/eval_corpus.json`
+   - **API:** `MODEL_DIR=YOUR_USERNAME/instacart-two-tower-sbert uvicorn src.api.main:app --port 8000`
+
+   `SentenceTransformer` accepts both a local path and a Hub model ID, so no code changes are required.
+
+---
+
+## How to use each component
 
 | Component                        | Command / Usage                                                          | When to use                                                                               |
 | -------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
@@ -72,8 +122,7 @@ Or with pip: `pip install -e .` (see `pyproject.toml` for dependencies). 3. **Do
 | **Feedback analytics**           | `uv run python scripts/feedback_analytics.py`                            | CTR, add-to-cart rate, purchase rate from feedback                                        |
 | **Generate sample feedback**     | `uv run python scripts/generate_sample_feedback.py`                      | Send recommend + feedback requests to API (run feedback_analytics separately for reports) |
 | **API tests**                    | `uv run pytest tests/ -v`                                                | Run API tests (mocked recommender)                                                        |
-| **Docker**                       | `docker build -t instacart-rec-api .` then `docker run ...`              | Containerized deployment                                                                  |
-
+| **Docker**                       | `docker build -t instacart-rec-api .` then `docker run -p 8000:8000 -v ...` (see [API](#api) Docker) | Containerized deployment                                                                  |
 
 **Typical workflow:** 1) Prepare → 2) Train → 3) Serve (CLI or API) → 4) Collect feedback via API → 5) Run feedback analytics.
 
@@ -83,7 +132,6 @@ Or with pip: `pip install -e .` (see `pyproject.toml` for dependencies). 3. **Do
 
 ### Input files (under `data/`)
 
-
 | File                        | Key columns                                                                                         | Role                                                                                                                          |
 | --------------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | **orders.csv**              | order_id, user_id, **eval_set**, order_number, order_dow, order_hour_of_day, days_since_prior_order | `eval_set == "train"` → target “next” orders we predict for; `eval_set == "prior"` → history used to build user context only. |
@@ -92,13 +140,11 @@ Or with pip: `pip install -e .` (see `pyproject.toml` for dependencies). 3. **Do
 | **aisles.csv**              | aisle_id, aisle                                                                                     | Aisle names for product text.                                                                                                 |
 | **departments.csv**         | department_id, department                                                                           | Department names for product text.                                                                                            |
 
-
-No `order_products__train.csv` is required for this pipeline: we only use prior orders for context and the train-set orders to define *which* next order we are predicting (and to split train/eval by order).
+No `order_products__train.csv` is required for this pipeline: we only use prior orders for context and the train-set orders to define _which_ next order we are predicting (and to split train/eval by order).
 
 ### Data prep output (processed/)
 
 Data prep writes under a **param-based subdir** of `processed/`, e.g. `processed/p5_mp20_ef0.1/`, so different runs (e.g. different `max_prior_orders` or `eval_frac`) do not overwrite each other. The subdir name encodes: `p` = max_prior_orders, `mp` = max_product_names, `ef` = eval_frac (and optionally `sf` = sample_frac, `no_serve` if eval queries keep “Next: …”).
-
 
 | Output                      | Description                                                                                                                            |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
@@ -108,7 +154,6 @@ Data prep writes under a **param-based subdir** of `processed/`, e.g. `processed
 | **eval_corpus.json**        | Map from product_id (string) to product text (`"Product: X. Aisle: Y. Department: Z."`).                                               |
 | **eval_relevant_docs.json** | Map from query_id to list of product_ids that are in that order’s next basket (relevance labels for IR metrics).                       |
 | **data_prep_params.json**   | Record of the data prep arguments and counts (n_train_pairs, n_eval_queries, n_corpus, etc.).                                          |
-
 
 ---
 
@@ -158,10 +203,10 @@ uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 
 ## Prediction problem
 
-- **Task:** Rank the catalog so products in the user’s *next* order are at the top (see **What we are predicting** above).
-- **Input:** User context from *prior* orders only: a single text string built from the last N prior orders (product names in sequence, optional timing like “ordered 7 days after previous on weekday 4 at hour 14”). No information from the “next” order is included at prediction time.
+- **Task:** Rank the catalog so products in the user’s _next_ order are at the top (see **What we are predicting** above).
+- **Input:** User context from _prior_ orders only: a single text string built from the last N prior orders (product names in sequence, optional timing like “ordered 7 days after previous on weekday 4 at hour 14”). No information from the “next” order is included at prediction time.
 - **Output:** A ranking over the full product catalog: each product gets a score (cosine similarity between the encoded context and the encoded product text). We return the top-k product IDs (and optionally scores).
-- **Train vs serve:** For **training**, each (anchor, positive) pair has anchor = prior-only context (and during data prep we can optionally include “Next: weekday X, hour Y, …” in the anchor for that target order). The **positive** is one product that actually appears in that order’s next basket. For **serve and evaluation**, the query is the *same* prior-only context **without** the “Next: …” segment, so we never use future information and the setup matches production.
+- **Train vs serve:** For **training**, each (anchor, positive) pair has anchor = prior-only context (and during data prep we can optionally include “Next: weekday X, hour Y, …” in the anchor for that target order). The **positive** is one product that actually appears in that order’s next basket. For **serve and evaluation**, the query is the _same_ prior-only context **without** the “Next: …” segment, so we never use future information and the setup matches production.
 
 ---
 
@@ -169,18 +214,15 @@ uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 
 ### Data prep (example: max_prior_orders=5, max_product_names=20, eval_frac=0.1)
 
-
 | Train pairs | Eval pairs | Eval queries | Corpus size |
 | ----------- | ---------- | ------------ | ----------- |
 | ~1.25M      | ~138k      | ~13k         | ~50k        |
-
 
 Train/eval are split **by order** so that all pairs from a given order are in one split; eval queries are the hold-out orders, and the corpus is the full product set (~50k). Each eval query has one or more relevant products (the products actually in that order’s next basket).
 
 ### Example evaluation metrics
 
 Setup: `processed/p5_mp20_ef0.1`, base model `all-MiniLM-L6-v2`, `max_seq_length` 256, default batch size and learning rate (e.g. `--lr 1e-4`). Evaluation runs over ~13k eval queries and ~50k corpus via the built-in `InformationRetrievalEvaluator`.
-
 
 | Metric      | After 1 epoch | After 2 epochs | After 3 epochs | After 4 epochs | After 5 epochs |
 | ----------- | ------------- | -------------- | -------------- | -------------- | -------------- |
@@ -190,7 +232,6 @@ Setup: `processed/p5_mp20_ef0.1`, base model `all-MiniLM-L6-v2`, `max_seq_length
 | MRR@10      | 0.287         | 0.311          | 0.329          | 0.331          | 0.325          |
 | NDCG@10     | 0.125         | 0.139          | 0.150          | 0.153          | 0.151          |
 | MAP@100     | 0.071         | 0.078          | 0.085          | 0.086          | 0.085          |
-
 
 **What the metrics mean:** Accuracy@k = fraction of queries where at least one relevant product appears in the top-k. Recall@10 = fraction of relevant products found in the top-10 (averaged per query). MRR@10 = mean reciprocal rank of the first relevant product in the top-10. NDCG@10 = normalized discounted cumulative gain at 10 (rewards relevant items ranked higher). MAP@100 = mean average precision over the top-100. All are computed per query and averaged; higher is better.
 
@@ -207,7 +248,6 @@ To compare the two-tower SBERT model with simpler methods, the repo includes two
 
 **Baseline results** (same eval set as above: ~13k queries, ~50k corpus, `processed/p5_mp20_ef0.1`):
 
-
 | Metric      | Content-based (untrained SBERT) | Collaborative filtering (item-item) |
 | ----------- | ------------------------------- | ----------------------------------- |
 | Accuracy@1  | 0.046                           | 0.030                               |
@@ -216,7 +256,6 @@ To compare the two-tower SBERT model with simpler methods, the repo includes two
 | MRR@10      | 0.071                           | 0.059                               |
 | NDCG@10     | 0.086                           | 0.080                               |
 | MAP@100     | 0.018                           | 0.010                               |
-
 
 Fine-tuned SBERT (4–5 epochs) reaches **Accuracy@10 ~0.54**, so training on Instacart (anchor, positive) pairs yields a large gain over both baselines. CF runs can take several hours (progress bars show progress).
 
@@ -242,7 +281,7 @@ Typical expectation: **SBERT (after 4–5 epochs) outperforms both** (e.g. Accur
 The serve script supports two ways to try it. **1. Built-in demo query** — Run without `--query` to use a **built-in demo query** that mimics a user who previously ordered “Organic Milk, Whole Wheat Bread” in a context where the last order was 7 days prior, on weekday 4 at hour 14. The format is:
 
 - `**[+7d w4h14]` — shorthand for “ordered 7 days after previous order, on weekday 4 (0–6), at hour 14”.
-- `**Organic Milk, Whole Wheat Bread.`** — product names from prior orders (sequence preserved, comma-separated).
+- `**Organic Milk, Whole Wheat Bread.`\*\* — product names from prior orders (sequence preserved, comma-separated).
 
 So the full string is exactly what the data prep pipeline produces for the “anchor” side when we strip the “Next: …” part. You can pass any custom context with `--query "..."` or run on a stored eval query with `--eval-query-id <order_id>` (the script then loads that order’s context from `eval_queries.json`).
 
@@ -319,21 +358,20 @@ uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 
 Then open [http://localhost:8000/docs](http://localhost:8000/docs) for interactive API documentation.
 
-**Environment variables:**
+The server **loads the model from local disk by default** (`models/two_tower_sbert/final`). You can override with `MODEL_DIR` (another local path or a Hugging Face model ID).
 
+**Environment variables:**
 
 | Variable           | Description                                                                                    |
 | ------------------ | ---------------------------------------------------------------------------------------------- |
-| `MODEL_DIR`        | Path to the trained model directory (default: `models/two_tower_sbert/final`)                  |
+| `MODEL_DIR`        | Path to the trained model directory (default: `models/two_tower_sbert/final`), or a Hugging Face model ID |
 | `CORPUS_PATH`      | Path to the product corpus JSON (default: `processed/.../eval_corpus.json`)                    |
 | `FEEDBACK_DB_PATH` | Path to the SQLite database for feedback events (default: `data/feedback.db`)                  |
 | `INFERENCE_DEVICE` | Device for model inference: `cuda`, `mps` (Apple Silicon), or `cpu` (default: auto-detect)     |
 | `API_KEY`          | When set, require API key on `/recommend` and `/feedback` (X-API-Key or Authorization: Bearer) |
 | `RATE_LIMIT`       | Rate limit per IP (default: `100/minute`). Health, ready, and metrics are exempt.              |
 
-
 ### Endpoints
-
 
 | Method | Path         | Description                                       |
 | ------ | ------------ | ------------------------------------------------- |
@@ -342,7 +380,6 @@ Then open [http://localhost:8000/docs](http://localhost:8000/docs) for interacti
 | `GET`  | `/health`    | Liveness probe (exempt from rate limit)           |
 | `GET`  | `/ready`     | Readiness probe (model and corpus loaded)         |
 | `GET`  | `/metrics`   | Prometheus metrics (scrape for Grafana, alerting) |
-
 
 ### POST /recommend
 
@@ -445,13 +482,11 @@ uv run python scripts/feedback_analytics.py
 uv run python scripts/feedback_analytics.py --db-path data/feedback.db --since 2025-01-01 --show-funnel-sample 5
 ```
 
-
 | Flag                   | Description                                                          |
 | ---------------------- | -------------------------------------------------------------------- |
 | `--db-path`            | Feedback DB path (default: `FEEDBACK_DB_PATH` or `data/feedback.db`) |
 | `--since`              | Only include events on or after this date (ISO format)               |
 | `--show-funnel-sample` | Number of per-request funnels to print (0 to disable)                |
-
 
 ### Generate sample feedback
 
@@ -463,7 +498,6 @@ uv run python scripts/generate_sample_feedback.py
 uv run python scripts/generate_sample_feedback.py --num-requests 200 --top-k 20
 ```
 
-
 | Flag              | Description                                         |
 | ----------------- | --------------------------------------------------- |
 | `--url`           | API base URL (default: `http://localhost:8000`)     |
@@ -474,7 +508,6 @@ uv run python scripts/generate_sample_feedback.py --num-requests 200 --top-k 20
 | `--purchase-rate` | Fraction of add-to-cart → purchase (default: 0.6)   |
 | `--api-key`       | API key when `API_KEY` is set (optional)            |
 
-
 ### Compare untrained vs trained
 
 Check for embedding collapse and compare metrics between frozen pretrained and your fine-tuned model:
@@ -484,7 +517,6 @@ uv run python scripts/compare_untrained_vs_trained.py
 uv run python scripts/compare_untrained_vs_trained.py --processed-dir processed/p5_mp20_ef0.1 --model-dir models/two_tower_sbert/final --sample-queries 1000
 ```
 
-
 | Flag               | Description                                      |
 | ------------------ | ------------------------------------------------ |
 | `--processed-dir`  | Processed data dir (default: auto-resolve)       |
@@ -492,11 +524,9 @@ uv run python scripts/compare_untrained_vs_trained.py --processed-dir processed/
 | `--base-model`     | Pretrained model name (must match training base) |
 | `--sample-queries` | Use random subset of eval queries for faster run |
 
-
 ---
 
 ## Project structure
-
 
 | Path                                       | Description                                                                                                                                                                                                                                       |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -514,7 +544,6 @@ uv run python scripts/compare_untrained_vs_trained.py --processed-dir processed/
 | **src/baselines/**                         | Content-based (untrained SBERT) and CF (item-item) baselines; same eval and metrics as SBERT. Run: `python -m src.baselines`.                                                                                                                     |
 | **notebooks/**                             | Jupyter notebooks for data prep, training, serve, and baselines (mirror the scripts for interactive use).                                                                                                                                         |
 | **pyproject.toml**, **uv.lock**            | Project and dependency lock (uv).                                                                                                                                                                                                                 |
-
 
 ---
 

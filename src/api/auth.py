@@ -22,7 +22,12 @@ def _extract_api_key(x_api_key: str | None = None, authorization: str | None = N
     """
     Extract API key from X-API-Key header or Authorization: Bearer header.
 
-    Returns the key if present, None otherwise.
+    Args:
+        x_api_key: Value of X-API-Key header.
+        authorization: Value of Authorization header.
+
+    Returns:
+        The key if present, None otherwise.
     """
     if x_api_key:
         return x_api_key.strip()
@@ -38,9 +43,15 @@ async def verify_api_key(
     """
     Dependency that verifies API key when API_KEY env is set.
 
-    When API_KEY is not set, all requests pass (auth disabled).
-    When set, /recommend and /feedback must include valid key in X-API-Key or Authorization: Bearer.
-    Raises 401 if key is missing or invalid.
+    When API_KEY is not set, all requests pass (auth disabled). When set,
+    /recommend and /feedback must include valid key in X-API-Key or Authorization: Bearer.
+
+    Args:
+        x_api_key: Injected X-API-Key header.
+        authorization: Injected Authorization header.
+
+    Raises:
+        HTTPException: 401 if key is required but missing or invalid.
     """
     expected = _get_expected_api_key()
     if not expected:

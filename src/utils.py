@@ -23,6 +23,15 @@ class ColoredFormatter(logging.Formatter):
     """Formatter that colorizes level name and logger name, message-only output."""
 
     def format(self, record: logging.LogRecord) -> str:
+        """
+        Format the log record with colorized level and logger name.
+
+        Args:
+            record: LogRecord to format.
+
+        Returns:
+            Formatted log line string.
+        """
         c = _LEVEL_COLORS.get(record.levelname, "")
         record.levelname = f"{c}{record.levelname:5}{_RESET}"
         record.name = f"{_GRAY}{record.name}{_RESET}"

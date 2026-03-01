@@ -21,7 +21,12 @@ from src.api.feedback_store import DEFAULT_FEEDBACK_DB_PATH, init_db
 
 
 def _get_db_path() -> Path:
-    """Resolve feedback DB path from env or default."""
+    """
+    Resolve feedback DB path from env or default.
+
+    Returns:
+        Path to feedback.db (from FEEDBACK_DB_PATH or default).
+    """
     import os
 
     value = os.getenv("FEEDBACK_DB_PATH")

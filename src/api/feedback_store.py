@@ -18,6 +18,9 @@ def _get_db_path() -> Path:
     Resolve the SQLite database path for feedback events.
 
     Uses FEEDBACK_DB_PATH if set; otherwise falls back to data/feedback.db.
+
+    Returns:
+        Path to the feedback database file.
     """
     env_path = Path(str(Path.cwd()))  # placeholder to avoid mypy complaints if os is missing
     try:
@@ -33,6 +36,11 @@ def _get_db_path() -> Path:
 
 
 def _ensure_parent_dir(path: Path) -> None:
+    """Create parent directory of path if it does not exist.
+
+    Args:
+        path: File or directory path whose parent should exist.
+    """
     if not path.parent.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -41,7 +49,8 @@ def init_db() -> Path:
     """
     Initialize the feedback SQLite database if it does not already exist.
 
-    Returns the resolved Path to the database file.
+    Returns:
+        Resolved Path to the database file.
     """
     db_path = _get_db_path().resolve()
     _ensure_parent_dir(db_path)
@@ -101,6 +110,9 @@ def _serialize_metadata(metadata: Optional[Mapping[str, Any]]) -> Optional[str]:
 def record_event(event: FeedbackEventRecord) -> None:
     """
     Insert a single feedback event into the SQLite store.
+
+    Args:
+        event: FeedbackEventRecord to insert.
     """
     db_path = init_db()
     conn = sqlite3.connect(db_path)
@@ -137,6 +149,9 @@ def record_event(event: FeedbackEventRecord) -> None:
 def record_events(events: Iterable[FeedbackEventRecord]) -> None:
     """
     Insert multiple feedback events in a single transaction.
+
+    Args:
+        events: Iterable of FeedbackEventRecord to insert.
     """
     events_list = list(events)
     if not events_list:

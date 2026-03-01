@@ -36,7 +36,12 @@ class ContentBasedBaseline:
         )
 
     def rank_all(self) -> dict[str, list[str]]:
-        """Return query_id -> list of product_id ranked by cosine similarity (desc)."""
+        """
+        Rank corpus for each query by cosine similarity (descending).
+
+        Returns:
+            Dict mapping query_id to list of product_id ranked by score descending.
+        """
         query_ids = list(self.eval_queries.keys())
         query_texts = [self.eval_queries[qid] for qid in query_ids]
         query_embeddings = self.model.encode(
