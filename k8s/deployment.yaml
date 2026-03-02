@@ -35,8 +35,7 @@ spec:
     spec:
       containers:
         - name: api
-          # Update to your registry: <registry>/instacart-rec-api:latest
-          image: instacart-rec-api:latest
+          image: chenbowen184/instacart-rec-api:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
