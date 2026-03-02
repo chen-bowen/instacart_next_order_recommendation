@@ -1,0 +1,52 @@
+# PersistentVolumeClaims for models, processed data, and feedback storage
+#
+# Create these before deploying. Populate them with:
+#   - models: trained model (models/two_tower_sbert/final/) or leave empty to use HuggingFace model
+#   - processed: output of data prep (processed/p5_mp20_ef0.1/)
+#   - data: feedback.db and any other runtime data
+#
+# To populate from local machine (example with a node that has the data):
+#   kubectl cp ./models instacart-rec/<pod>:/tmp/models
+#   kubectl exec <pod> -n instacart-rec -- cp -r /tmp/models/* /app/models/
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: instacart-models-pvc
+  labels:
+    app: instacart-rec-api
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: standard  # Uncomment and set for your cluster
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: instacart-processed-pvc
+  labels:
+    app: instacart-rec-api
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  # storageClassName: standard
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: instacart-data-pvc
+  labels:
+    app: instacart-rec-api
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 512Mi
+  # storageClassName: standard

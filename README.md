@@ -4,7 +4,7 @@ This project ranks products by likelihood of appearing in a user's next order. I
 
 See the the two blog posts for a deeper walkthrough [blog post part 1](https://medium.com/@bowenchen/from-purchase-history-to-recommendations-a-two-tower-approach-to-rank-products-c624d8a6c024)
 
-**Contents:** [What we are predicting](#what-we-are-predicting) · [Requirements](#requirements) · [Setup](#setup) · [How to use each component](#how-to-use-each-component) · [Pipeline](#pipeline) · [Results](#results) · [API](#api) · [Project structure](#project-structure)
+**Contents:** [What we are predicting](#what-we-are-predicting) · [Requirements](#requirements) · [Setup](#setup) · [How to use each component](#how-to-use-each-component) · [Pipeline](#pipeline) · [Results](#results) · [API](#api) · [Docker](#docker) · [Kubernetes](#kubernetes) · [Project structure](#project-structure)
 
 ---
 
@@ -370,21 +370,6 @@ Events are stored in SQLite (`feedback_events` table) with indices on `request_i
 - `GET /health` → `{ "status": "ok" }`
 - `GET /ready` → `{ "status": "ready" }` once model and corpus are loaded
 
-### Docker
-
-Build and run with Docker (mount models, processed, and data at runtime):
-
-```bash
-docker build -t instacart-rec-api .
-docker run -p 8000:8000 \
-  -v $(pwd)/models:/app/models \
-  -v $(pwd)/processed:/app/processed \
-  -v $(pwd)/data:/app/data \
-  -e MODEL_DIR=/app/models/two_tower_sbert/final \
-  -e CORPUS_PATH=/app/processed/p5_mp20_ef0.1/eval_corpus.json \
-  instacart-rec-api
-```
-
 ### Feedback analytics
 
 Compute CTR, add-to-cart rate, and purchase rate from stored feedback events. Per-request funnels are sorted by conversion depth (purchases first) so full-funnel examples appear at the top:
@@ -438,6 +423,109 @@ uv run python scripts/compare_untrained_vs_trained.py --processed-dir processed/
 
 ---
 
+## Docker
+
+The API runs in a multi-stage Docker image. Build and run with volume mounts for models, processed data, and feedback storage.
+
+### Build
+
+```bash
+docker build -t instacart-rec-api .
+```
+
+### Run
+
+**Prerequisites:** Run [data prep](#1-prepare) and [training](#2-train) first so `models/` and `processed/` exist. Or use the [Hugging Face model](#using-the-hugging-face-model) and only `processed/` from data prep.
+
+```bash
+docker run -p 8000:8000 \
+  -v "$(pwd)/models:/app/models" \
+  -v "$(pwd)/processed:/app/processed" \
+  -v "$(pwd)/data:/app/data" \
+  -e MODEL_DIR=/app/models/two_tower_sbert/final \
+  -e CORPUS_PATH=/app/processed/p5_mp20_ef0.1/eval_corpus.json \
+  instacart-rec-api
+```
+
+**Note:** Use quoted volume paths (`"$(pwd)/models"`) if your project path contains spaces (e.g. `AI & ML`).
+
+### Using the Hugging Face model
+
+Skip local training and use the pre-trained model. You still need `eval_corpus.json` from data prep:
+
+```bash
+docker run -p 8000:8000 \
+  -v "$(pwd)/processed:/app/processed" \
+  -v "$(pwd)/data:/app/data" \
+  -e MODEL_DIR=chenbowen184/instacart-two-tower-sbert \
+  -e CORPUS_PATH=/app/processed/p5_mp20_ef0.1/eval_corpus.json \
+  instacart-rec-api
+```
+
+### Environment variables
+
+| Variable           | Description                                                                 |
+| ------------------ | --------------------------------------------------------------------------- |
+| `MODEL_DIR`        | Path to model dir or Hugging Face model ID                                  |
+| `CORPUS_PATH`      | Path to `eval_corpus.json`                                                  |
+| `FEEDBACK_DB_PATH` | SQLite path for feedback (default: `/app/data/feedback.db`)                  |
+| `INFERENCE_DEVICE` | `cuda`, `mps`, or `cpu` (default: auto; Docker uses CPU—see note below)     |
+
+### Inference device in Docker
+
+Docker runs Linux containers. **MPS** (Apple Silicon) is macOS-only and is not available inside the container. **CUDA** requires an NVIDIA GPU, the NVIDIA Container Toolkit, and a CUDA base image. By default, the container falls back to **CPU**.
+
+For GPU inference on Apple Silicon, run the API directly with `uv run uvicorn` instead of Docker.
+
+---
+
+## Kubernetes
+
+Deploy the recommendation API to Kubernetes using the manifests in `k8s/`.
+
+### Prerequisites
+
+- `kubectl` configured for your cluster
+- Docker image pushed to a registry (e.g. `ghcr.io/your-org/instacart-rec-api:latest`)
+- Models and processed data available (PVC, NFS, or init container)
+
+### Quick start
+
+1. **Build and push the image:**
+
+   ```bash
+   docker build -t <your-registry>/instacart-rec-api:latest .
+   docker push <your-registry>/instacart-rec-api:latest
+   ```
+
+2. **Create a namespace and apply manifests:**
+
+   ```bash
+   kubectl create namespace instacart-rec
+   kubectl apply -f k8s/ -n instacart-rec
+   ```
+
+3. **Populate data volumes:** The Deployment expects `models`, `processed`, and `data` at `/app`. Use a one-off Job, init container, or pre-populated PVC. See `k8s/README.md` for details.
+
+4. **Expose the service:**
+
+   ```bash
+   kubectl port-forward svc/instacart-rec-api 8000:8000 -n instacart-rec
+   ```
+
+   Then open http://localhost:8000/docs.
+
+### Manifests
+
+| File                  | Description                                        |
+| --------------------- | -------------------------------------------------- |
+| `k8s/deployment.yaml` | Deployment, Service, ConfigMap                     |
+| `k8s/pvc.yaml`        | PersistentVolumeClaims for models, processed, data |
+| `k8s/data-loader-pod.yaml` | One-off pod for copying local data into PVCs  |
+| `k8s/README.md`       | Detailed deployment and data setup instructions    |
+
+---
+
 ## Project structure
 
 | Path                                       | Description                                                                                                                                                                                                                                       |
@@ -456,6 +544,7 @@ uv run python scripts/compare_untrained_vs_trained.py --processed-dir processed/
 | **src/baselines/**                         | Content-based (untrained SBERT) and CF (item-item) baselines; same eval and metrics as SBERT. Run: `python -m src.baselines`.                                                                                                                     |
 | **notebooks/**                             | Jupyter notebooks for data prep, training, serve, and baselines (mirror the scripts for interactive use).                                                                                                                                         |
 | **pyproject.toml**, **uv.lock**            | Project and dependency lock (uv).                                                                                                                                                                                                                 |
+| **k8s/**                                   | Kubernetes manifests: `deployment.yaml`, `pvc.yaml`, `README.md`.                                                                                                                                                                                  |
 
 ---
 

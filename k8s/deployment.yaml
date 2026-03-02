@@ -1,0 +1,100 @@
+# Instacart Recommendation API - Kubernetes Deployment
+#
+# Prerequisites:
+#   - Push image: docker build -t <registry>/instacart-rec-api:latest . && docker push <registry>/instacart-rec-api:latest
+#   - Update image below and apply PVCs (kubectl apply -f pvc.yaml)
+#   - Populate PVCs with models, processed data (see k8s/README.md)
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: instacart-rec-api-config
+  labels:
+    app: instacart-rec-api
+data:
+  MODEL_DIR: "/app/models/two_tower_sbert/final"
+  CORPUS_PATH: "/app/processed/p5_mp20_ef0.1/eval_corpus.json"
+  FEEDBACK_DB_PATH: "/app/data/feedback.db"
+  INFERENCE_DEVICE: "cpu"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: instacart-rec-api
+  labels:
+    app: instacart-rec-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: instacart-rec-api
+  template:
+    metadata:
+      labels:
+        app: instacart-rec-api
+    spec:
+      containers:
+        - name: api
+          # Update to your registry: <registry>/instacart-rec-api:latest
+          image: instacart-rec-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: instacart-rec-api-config
+          volumeMounts:
+            - name: models
+              mountPath: /app/models
+            - name: processed
+              mountPath: /app/processed
+            - name: data
+              mountPath: /app/data
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: instacart-models-pvc
+        - name: processed
+          persistentVolumeClaim:
+            claimName: instacart-processed-pvc
+        - name: data
+          persistentVolumeClaim:
+            claimName: instacart-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: instacart-rec-api
+  labels:
+    app: instacart-rec-api
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http
+  selector:
+    app: instacart-rec-api

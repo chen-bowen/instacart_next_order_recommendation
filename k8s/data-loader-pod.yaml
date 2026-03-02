@@ -1,0 +1,31 @@
+# One-off pod for copying local data into PVCs.
+# Apply, copy files with kubectl cp, then delete the pod.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: data-loader
+  labels:
+    app: instacart-rec-api
+spec:
+  restartPolicy: Never
+  containers:
+    - name: loader
+      image: busybox:latest
+      command: ["sleep", "3600"]
+      volumeMounts:
+        - name: processed
+          mountPath: /mnt/processed
+        - name: models
+          mountPath: /mnt/models
+        - name: data
+          mountPath: /mnt/data
+  volumes:
+    - name: processed
+      persistentVolumeClaim:
+        claimName: instacart-processed-pvc
+    - name: models
+      persistentVolumeClaim:
+        claimName: instacart-models-pvc
+    - name: data
+      persistentVolumeClaim:
+        claimName: instacart-data-pvc
