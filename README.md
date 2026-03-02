@@ -318,22 +318,42 @@ Alternatively, for demos, provide a `user_id` (order_id as string) resolved via 
 
 ```json
 {
-  "request_id": "b1c0d4b4-3c2f-4d5e-9a51-9f2ea6c5a123",
+  "request_id": "d24687e6-7e49-49e9-a205-0505332afd25",
   "recommendations": [
     {
       "product_id": "13517",
       "score": 0.7639,
       "product_text": "Product: Whole Wheat Bread. Aisle: bread. Department: bakery."
+    },
+    {
+      "product_id": "34479",
+      "score": 0.7101,
+      "product_text": "Product: Whole Wheat Walnut Bread. Aisle: bread. Department: bakery."
+    },
+    {
+      "product_id": "48628",
+      "score": 0.7062,
+      "product_text": "Product: Organic Whole Wheat Bread. Aisle: bread. Department: bakery."
+    },
+    {
+      "product_id": "1463",
+      "score": 0.6928,
+      "product_text": "Product: Organic Milk. Aisle: milk. Department: dairy eggs."
+    },
+    {
+      "product_id": "16490",
+      "score": 0.6510,
+      "product_text": "Product: Old Fashioned Whole Wheat Bread. Aisle: bread. Department: bakery."
     }
   ],
   "stats": {
-    "total_latency_ms": 12.5,
-    "query_embedding_time_ms": 8.2,
-    "similarity_compute_time_ms": 4.1,
-    "num_recommendations": 10,
+    "total_latency_ms": 119.9,
+    "query_embedding_time_ms": 85.0,
+    "similarity_compute_time_ms": 9.4,
+    "num_recommendations": 5,
     "top_score": 0.7639,
-    "avg_score": 0.612,
-    "timestamp": 1730188800.0
+    "avg_score": 0.7048,
+    "timestamp": 1772490882.9
   }
 }
 ```
@@ -349,7 +369,7 @@ Send a single event or a batch. Returns `202 Accepted`.
 {
   "events": [
     {
-      "request_id": "b1c0d4b4-3c2f-4d5e-9a51-9f2ea6c5a123",
+      "request_id": "d24687e6-7e49-49e9-a205-0505332afd25",
       "event_type": "impression",
       "product_id": "13517",
       "user_id": "123",
