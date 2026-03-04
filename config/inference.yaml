@@ -1,0 +1,12 @@
+# CLI inference config
+# Run: uv run python -m src.inference
+# Override: uv run python -m src.inference --config config/other.yaml
+
+model_dir: models/two_tower_sbert/final
+corpus: processed/p5_mp20_ef0.1/eval_corpus.json
+
+use_index: true
+
+query: null  # User context string; null = use built-in demo
+eval_query_id: null  # Or use query from eval_queries.json by ID
+top_k: 10

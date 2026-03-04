@@ -17,12 +17,18 @@ import random
 from pathlib import Path
 
 import numpy as np
+import yaml
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.util import cos_sim
 
 from src.baselines.collaborative_filtering import load_eval_data
 from src.baselines.metrics import compute_ir_metrics
-from src.constants import DEFAULT_MODEL_DIR, DEFAULT_PROCESSED_DIR
+from src.constants import (
+    DEFAULT_CONFIG_COMPARE,
+    DEFAULT_MODEL_DIR,
+    DEFAULT_PROCESSED_DIR,
+    PROJECT_ROOT,
+)
 from src.utils import resolve_processed_dir
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -131,41 +137,29 @@ def _embedding_collapse_metrics(
     }
 
 
+def load_config(config_path: Path | None = None) -> dict:
+    """Load compare config from YAML."""
+    path = Path(config_path) if config_path else DEFAULT_CONFIG_COMPARE
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    with open(path) as f:
+        raw = yaml.safe_load(f) or {}
+    return {
+        "processed_dir": raw.get("processed_dir", str(DEFAULT_PROCESSED_DIR)),
+        "model_dir": raw.get("model_dir", str(DEFAULT_MODEL_DIR)),
+        "base_model": str(raw.get("base_model", "sentence-transformers/all-MiniLM-L6-v2")),
+        "batch_size": int(raw.get("batch_size", 64)),
+        "sample_queries": raw.get("sample_queries"),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compare untrained vs trained SBERT; report IR metrics and collapse indicators")
-    parser.add_argument(
-        "--processed-dir",
-        type=Path,
-        default=DEFAULT_PROCESSED_DIR,
-        help="Processed dir (e.g. processed/p5_mp20_ef0.1)",
-    )
-    parser.add_argument(
-        "--model-dir",
-        type=Path,
-        default=DEFAULT_MODEL_DIR,
-        help="Path to trained model checkpoint (e.g. models/two_tower_sbert/final)",
-    )
-    parser.add_argument(
-        "--base-model",
-        type=str,
-        default="sentence-transformers/all-MiniLM-L6-v2",
-        help="Pretrained model name (must match training base for fair comparison)",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=64,
-        help="Encode batch size",
-    )
-    parser.add_argument(
-        "--sample-queries",
-        type=int,
-        default=None,
-        help="If set, use a random subset of eval queries (faster run)",
-    )
+    parser.add_argument("--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_COMPARE.relative_to(PROJECT_ROOT)})")
     args = parser.parse_args()
 
-    processed_dir, msg = resolve_processed_dir(args.processed_dir, DEFAULT_PROCESSED_DIR)
+    cfg = load_config(args.config)
+    processed_dir, msg = resolve_processed_dir(Path(cfg["processed_dir"]), DEFAULT_PROCESSED_DIR)
     if msg:
         logger.info("%s", msg)
     logger.info("Processed dir: %s", processed_dir)
@@ -173,9 +167,9 @@ def main() -> None:
     eval_queries, eval_corpus, eval_relevant_docs = load_eval_data(processed_dir)
     logger.info("Eval queries: %d, corpus size: %d", len(eval_queries), len(eval_corpus))
 
-    if args.sample_queries and args.sample_queries < len(eval_queries):
+    if cfg["sample_queries"] and cfg["sample_queries"] < len(eval_queries):
         rng = random.Random(123)
-        qids = rng.sample(list(eval_queries.keys()), args.sample_queries)
+        qids = rng.sample(list(eval_queries.keys()), cfg["sample_queries"])
         eval_queries = {q: eval_queries[q] for q in qids}
         eval_relevant_docs = {q: eval_relevant_docs[q] for q in qids if q in eval_relevant_docs}
         logger.info("Sampled to %d queries", len(eval_queries))
@@ -189,7 +183,7 @@ def main() -> None:
     collapse_u = _embedding_collapse_metrics(q_emb_u, c_emb_u, "untrained")
 
     # ---- Trained (your checkpoint) ----
-    model_path = Path(args.model_dir).resolve()
+    model_path = Path(cfg["model_dir"]).resolve()
     if not model_path.exists():
         logger.error("Trained model dir not found: %s", model_path)
         return
@@ -197,7 +191,7 @@ def main() -> None:
 
     trained_model = SentenceTransformer(str(model_path))
     logger.info("Ranking with trained model...")
-    trained_rankings, q_emb_t, c_emb_t = _rank_all(trained_model, eval_queries, eval_corpus, batch_size=args.batch_size)
+    trained_rankings, q_emb_t, c_emb_t = _rank_all(trained_model, eval_queries, eval_corpus, batch_size=cfg["batch_size"])
     trained_metrics = compute_ir_metrics(trained_rankings, eval_relevant_docs)
     collapse_t = _embedding_collapse_metrics(q_emb_t, c_emb_t, "trained")
 

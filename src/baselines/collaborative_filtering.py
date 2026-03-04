@@ -15,6 +15,17 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
+from src.constants import (
+    EVAL_CORPUS_FILENAME,
+    EVAL_QUERIES_FILENAME,
+    EVAL_RELEVANT_DOCS_FILENAME,
+    EVAL_SET_PRIOR,
+    EVAL_SET_TRAIN,
+    ORDER_PRODUCTS_CHUNK_SIZE,
+    ORDER_PRODUCTS_PRIOR_CSV,
+    ORDERS_CSV,
+)
+
 
 def load_eval_data(processed_dir: Path) -> tuple[dict[str, str], dict[str, str], dict[str, set[str]]]:
     """
@@ -26,11 +37,11 @@ def load_eval_data(processed_dir: Path) -> tuple[dict[str, str], dict[str, str],
     Returns:
         Tuple of (eval_queries, eval_corpus, eval_relevant_docs).
     """
-    with open(processed_dir / "eval_queries.json") as f:
+    with open(processed_dir / EVAL_QUERIES_FILENAME) as f:
         eval_queries = json.load(f)
-    with open(processed_dir / "eval_corpus.json") as f:
+    with open(processed_dir / EVAL_CORPUS_FILENAME) as f:
         eval_corpus = json.load(f)
-    with open(processed_dir / "eval_relevant_docs.json") as f:
+    with open(processed_dir / EVAL_RELEVANT_DOCS_FILENAME) as f:
         raw = json.load(f)
     eval_relevant_docs = {k: set(v) for k, v in raw.items()}
     return eval_queries, eval_corpus, eval_relevant_docs
@@ -47,7 +58,7 @@ class ItemItemCFBaseline:
         self,
         data_dir: Path,
         processed_dir: Path,
-        order_products_chunk_size: int = 500_000,
+        order_products_chunk_size: int = ORDER_PRODUCTS_CHUNK_SIZE,
     ):
         self.data_dir = Path(data_dir)
         self.processed_dir = Path(processed_dir)
@@ -60,12 +71,12 @@ class ItemItemCFBaseline:
 
     def _build(self) -> None:
         # Load orders: train orders (eval targets) and prior orders
-        orders = pd.read_csv(self.data_dir / "orders.csv")
-        train_orders = orders[orders["eval_set"] == "train"][["order_id", "user_id", "order_number"]]
-        prior_orders = orders[orders["eval_set"] == "prior"][["order_id", "user_id", "order_number"]]
+        orders = pd.read_csv(self.data_dir / ORDERS_CSV)
+        train_orders = orders[orders["eval_set"] == EVAL_SET_TRAIN][["order_id", "user_id", "order_number"]]
+        prior_orders = orders[orders["eval_set"] == EVAL_SET_PRIOR][["order_id", "user_id", "order_number"]]
 
         # Eval query IDs = train order_ids we have in eval_queries
-        with open(self.processed_dir / "eval_queries.json") as f:
+        with open(self.processed_dir / EVAL_QUERIES_FILENAME) as f:
             eval_q = json.load(f)
         eval_order_ids = {int(oid) for oid in eval_q.keys()}
 
@@ -81,9 +92,9 @@ class ItemItemCFBaseline:
 
         # Load order_products__prior in chunks; keep only prior_order_ids
         chunk_iter = pd.read_csv(
-            self.data_dir / "order_products__prior.csv", chunksize=self.order_products_chunk_size
+            self.data_dir / ORDER_PRODUCTS_PRIOR_CSV, chunksize=self.order_products_chunk_size
         )
-        for chunk in tqdm(chunk_iter, desc="Loading order_products__prior", unit="chunk"):
+        for chunk in tqdm(chunk_iter, desc=f"Loading {ORDER_PRODUCTS_PRIOR_CSV}", unit="chunk"):
             chunk = chunk[chunk["order_id"].isin(prior_order_ids)]
             for _, row in chunk.iterrows():
                 oid = int(row["order_id"])
@@ -120,7 +131,7 @@ class ItemItemCFBaseline:
                 self.eval_order_to_history[qid] = set()
 
         # Product list for ranking (from eval_corpus so we only rank known products)
-        with open(self.processed_dir / "eval_corpus.json") as f:
+        with open(self.processed_dir / EVAL_CORPUS_FILENAME) as f:
             corpus = json.load(f)
         self.corpus_ids = list(corpus.keys())
         self.product_ids.update(self.corpus_ids)

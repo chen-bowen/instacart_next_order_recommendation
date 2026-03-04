@@ -11,10 +11,17 @@ import argparse
 import logging
 from pathlib import Path
 
+import yaml
+
 from src.baselines.content_based import ContentBasedBaseline
 from src.baselines.collaborative_filtering import ItemItemCFBaseline, load_eval_data
 from src.baselines.metrics import compute_ir_metrics
-from src.constants import DEFAULT_DATA_DIR, DEFAULT_PROCESSED_DIR, PROJECT_ROOT
+from src.constants import (
+    DEFAULT_CONFIG_BASELINES,
+    DEFAULT_DATA_DIR,
+    DEFAULT_PROCESSED_DIR,
+    PROJECT_ROOT,
+)
 from src.utils import resolve_processed_dir
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -33,39 +40,29 @@ def print_metrics(name: str, metrics: dict[str, float]) -> None:
     print(f"  MAP@100:      {metrics['map_at_100']:.4f}")
 
 
+def load_config(config_path: Path | None = None) -> dict:
+    """Load baselines config from YAML."""
+    path = Path(config_path) if config_path else DEFAULT_CONFIG_BASELINES
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    with open(path) as f:
+        raw = yaml.safe_load(f) or {}
+    return {
+        "processed_dir": raw.get("processed_dir", str(DEFAULT_PROCESSED_DIR)),
+        "data_dir": raw.get("data_dir", str(DEFAULT_DATA_DIR)),
+        "model_name": str(raw.get("model_name", "sentence-transformers/all-MiniLM-L6-v2")),
+        "content_only": bool(raw.get("content_only", False)),
+        "cf_only": bool(raw.get("cf_only", False)),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run content-based and CF baselines")
-    parser.add_argument(
-        "--processed-dir",
-        type=Path,
-        default=DEFAULT_PROCESSED_DIR,
-        help="Processed dir (e.g. processed/p5_mp20_ef0.1)",
-    )
-    parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=DEFAULT_DATA_DIR,
-        help="Raw data dir (orders.csv, order_products__prior.csv)",
-    )
-    parser.add_argument(
-        "--model-name",
-        type=str,
-        default="sentence-transformers/all-MiniLM-L6-v2",
-        help="Base model for content-based baseline (same as training base; untrained)",
-    )
-    parser.add_argument(
-        "--content-only",
-        action="store_true",
-        help="Run only content-based baseline (faster; CF reads full order_products__prior)",
-    )
-    parser.add_argument(
-        "--cf-only",
-        action="store_true",
-        help="Run only collaborative filtering baseline",
-    )
+    parser.add_argument("--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_BASELINES.relative_to(PROJECT_ROOT)})")
     args = parser.parse_args()
 
-    processed_dir, msg = resolve_processed_dir(args.processed_dir, DEFAULT_PROCESSED_DIR)
+    cfg = load_config(args.config)
+    processed_dir, msg = resolve_processed_dir(Path(cfg["processed_dir"]), DEFAULT_PROCESSED_DIR)
     if msg:
         logger.info("%s", msg)
     logger.info("Processed dir: %s", processed_dir)
@@ -73,23 +70,23 @@ def main() -> None:
     eval_queries, eval_corpus, eval_relevant_docs = load_eval_data(processed_dir)
     logger.info("Eval queries: %d, corpus size: %d", len(eval_queries), len(eval_corpus))
 
-    if not args.cf_only:
+    if not cfg["cf_only"]:
         # Content-based (untrained SBERT: same model, no fine-tuning)
         logger.info("Building content-based (untrained SBERT) baseline...")
-        cb = ContentBasedBaseline(eval_queries, eval_corpus, model_name=args.model_name)
+        cb = ContentBasedBaseline(eval_queries, eval_corpus, model_name=cfg["model_name"])
         cb_rankings = cb.rank_all()
         cb_metrics = compute_ir_metrics(cb_rankings, eval_relevant_docs)
         print_metrics("Content-based (untrained SBERT)", cb_metrics)
 
-    if not args.content_only:
+    if not cfg["content_only"]:
         # Collaborative filtering (item-item) — reads full order_products__prior, can take 10+ min
         logger.info("Building collaborative filtering (item-item) baseline...")
-        cf = ItemItemCFBaseline(args.data_dir, processed_dir)
+        cf = ItemItemCFBaseline(Path(cfg["data_dir"]), processed_dir)
         cf_rankings = cf.rank_all(eval_query_ids=list(eval_queries.keys()))
         cf_metrics = compute_ir_metrics(cf_rankings, eval_relevant_docs)
         print_metrics("Collaborative filtering (item-item)", cf_metrics)
 
-    if not args.content_only and not args.cf_only:
+    if not cfg["content_only"] and not cfg["cf_only"]:
         print("\n--- Compare with SBERT (see README) ---")
         print("  After 4–5 epochs SBERT typically reaches Accuracy@10 ~0.54, Recall@10 ~0.13, NDCG@10 ~0.15.")
 

@@ -16,15 +16,28 @@ import logging
 import math
 from pathlib import Path
 
+import yaml
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-from src.constants import DEFAULT_PROCESSED_DIR, DEFAULT_OUTPUT_DIR, PROJECT_ROOT
+from src.constants import (
+    DATA_PREP_PARAMS_FILENAME,
+    DEFAULT_CONFIG_TRAIN,
+    DEFAULT_DOTENV_PATH,
+    DEFAULT_OUTPUT_DIR,
+    DEFAULT_PROCESSED_DIR,
+    EVAL_CORPUS_FILENAME,
+    EVAL_DATASET_SUBDIR,
+    EVAL_QUERIES_FILENAME,
+    EVAL_RELEVANT_DOCS_FILENAME,
+    PROJECT_ROOT,
+    TRAIN_DATASET_SUBDIR,
+)
 from src.utils import resolve_processed_dir, setup_colored_logging
 
 # Load .env from project root so HF_TOKEN (and others) are set before any Hugging Face calls
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(DEFAULT_DOTENV_PATH)
 
 import torch
 
@@ -37,7 +50,6 @@ from sentence_transformers import (  # Core Sentence Transformers training primi
     SentenceTransformerTrainer,  # high-level Trainer
     SentenceTransformerTrainingArguments,  # Trainer config wrapper
 )
-from sentence_transformers.data_collator import SentenceTransformerDataCollator
 from sentence_transformers.evaluation import (
     InformationRetrievalEvaluator,
 )  # Information Retrieval metrics (MRR, Recall@k, etc.)
@@ -75,8 +87,8 @@ def load_processed_data(
     if subdir_msg:
         logger.info("%s", subdir_msg)
 
-    train_path = processed_dir / "train_dataset"
-    eval_path = processed_dir / "eval_dataset"
+    train_path = processed_dir / TRAIN_DATASET_SUBDIR
+    eval_path = processed_dir / EVAL_DATASET_SUBDIR
 
     # Load train dataset with columns: anchor, positive
     train_dataset = load_from_disk(str(train_path))
@@ -87,11 +99,11 @@ def load_processed_data(
         eval_dataset = load_from_disk(str(eval_path))
 
     # Information Retrieval artifacts for InformationRetrievalEvaluator
-    with open(processed_dir / "eval_queries.json", "r") as f:
+    with open(processed_dir / EVAL_QUERIES_FILENAME, "r") as f:
         eval_queries: dict[str, str] = json.load(f)
-    with open(processed_dir / "eval_corpus.json", "r") as f:
+    with open(processed_dir / EVAL_CORPUS_FILENAME, "r") as f:
         eval_corpus: dict[str, str] = json.load(f)
-    with open(processed_dir / "eval_relevant_docs.json", "r") as f:
+    with open(processed_dir / EVAL_RELEVANT_DOCS_FILENAME, "r") as f:
         raw_relevant = json.load(f)
         # Convert JSON lists to sets for the evaluator
         eval_relevant_docs: dict[str, set[str]] = {
@@ -171,7 +183,7 @@ def train_two_tower_sbert(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load data prep params if available (saved by prepare_instacart_sbert)
-    data_prep_params_path = processed_dir / "data_prep_params.json"
+    data_prep_params_path = processed_dir / DATA_PREP_PARAMS_FILENAME
     if data_prep_params_path.exists():
         with open(data_prep_params_path) as f:
             data_prep_params = json.load(f)
@@ -316,76 +328,43 @@ def train_two_tower_sbert(
     logger.info("Done. Model saved to %s", final_dir)
 
 
+def load_config(config_path: Path | None = None) -> dict:
+    """Load training config from YAML. Paths resolved relative to PROJECT_ROOT."""
+    path = Path(config_path) if config_path else DEFAULT_CONFIG_TRAIN
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    with open(path) as f:
+        raw = yaml.safe_load(f) or {}
+
+    def resolve(p: str) -> Path:
+        return PROJECT_ROOT / p if p and not Path(p).is_absolute() else Path(p)
+
+    return {
+        "processed_dir": resolve(raw.get("processed_dir", str(DEFAULT_PROCESSED_DIR))),
+        "output_dir": resolve(raw.get("output_dir", str(DEFAULT_OUTPUT_DIR))),
+        "model_name": str(raw.get("model_name", "sentence-transformers/all-MiniLM-L6-v2")),
+        "max_seq_length": int(raw.get("max_seq_length", 256)),
+        "epochs": int(raw.get("epochs", 5)),
+        "train_batch_size": int(raw.get("train_batch_size", 64)),
+        "eval_batch_size": int(raw.get("eval_batch_size", 64)),
+        "gradient_accumulation_steps": int(raw.get("gradient_accumulation_steps", 1)),
+        "learning_rate": float(raw.get("learning_rate", 5e-5)),
+        "loss_scale": float(raw.get("loss_scale", 30.0)),
+        "dataloader_num_workers": int(raw.get("dataloader_num_workers", 0)),
+        "run_information_retrieval_evaluator": bool(raw.get("run_information_retrieval_evaluator", True)),
+    }
+
+
 def main() -> None:
     """
-    CLI entrypoint: parse arguments, call train_two_tower_sbert, and exit.
+    CLI entrypoint: load config from YAML, call train_two_tower_sbert, and exit.
     """
-    parser = argparse.ArgumentParser(
-        description="Train two-tower SBERT model on Instacart data"
-    )
-    parser.add_argument(
-        "--processed-dir",
-        type=Path,
-        default=DEFAULT_PROCESSED_DIR,
-        help="Directory containing processed datasets (train_dataset/, eval_dataset/, eval_*.json)",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help="Directory to write trained models/checkpoints",
-    )
-    parser.add_argument(
-        "--model-name",
-        type=str,
-        default="sentence-transformers/all-MiniLM-L6-v2",
-        help="Base SentenceTransformer model to finetune",
-    )
-    parser.add_argument(
-        "--max-seq-length",
-        type=int,
-        default=256,
-        help="Maximum sequence length for inputs (user context + product text). Default 256 for faster training with max_prior_orders=5, max_product_names=30.",
-    )
-    parser.add_argument(
-        "--epochs", type=int, default=5, help="Number of training epochs"
-    )
-    parser.add_argument(
-        "--train-batch-size",
-        type=int,
-        default=64,
-        help="Per-device train batch size. On MPS (Apple Silicon) use 16–32 to avoid OOM; combine with --gradient-accumulation-steps for effective batch size.",
-    )
-    parser.add_argument(
-        "--gradient-accumulation-steps",
-        type=int,
-        default=1,
-        help="Accumulate gradients this many steps before update. Use with smaller --train-batch-size to reduce peak memory (e.g. batch 16 + steps 4 = effective 64).",
-    )
-    parser.add_argument(
-        "--eval-batch-size", type=int, default=64, help="Per-device eval batch size"
-    )
-    parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
-    parser.add_argument(
-        "--loss-scale",
-        type=float,
-        default=30.0,
-        metavar="S",
-        help="Scale for MultipleNegativesRankingLoss (default 30.0). Higher = sharper softmax.",
-    )
-    parser.add_argument(
-        "--dataloader-num-workers",
-        type=int,
-        default=0,  # mps only supports single-threaded data loading
-        help="Number of worker processes for data loading (0 = single-threaded, 4-8 recommended)",
-    )
-    parser.add_argument(
-        "--no-information-retrieval-evaluator",
-        action="store_true",
-        help="Disable Information retrieval evaluator during training (much faster, only validation loss will be tracked)",
-    )
-
+    parser = argparse.ArgumentParser(description="Train two-tower SBERT model on Instacart data")
+    parser.add_argument("--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_TRAIN.relative_to(PROJECT_ROOT)})")
     args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    processed_dir, _ = resolve_processed_dir(cfg["processed_dir"], DEFAULT_PROCESSED_DIR)
 
     setup_colored_logging(
         quiet_loggers=[
@@ -398,18 +377,18 @@ def main() -> None:
     )
 
     train_two_tower_sbert(
-        processed_dir=args.processed_dir,
-        output_dir=args.output_dir,
-        model_name=args.model_name,
-        max_seq_length=args.max_seq_length,
-        num_train_epochs=args.epochs,
-        train_batch_size=args.train_batch_size,
-        eval_batch_size=args.eval_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.lr,
-        loss_scale=args.loss_scale,
-        dataloader_num_workers=args.dataloader_num_workers,
-        run_information_retrieval_evaluator=not args.no_information_retrieval_evaluator,
+        processed_dir=processed_dir,
+        output_dir=cfg["output_dir"],
+        model_name=cfg["model_name"],
+        max_seq_length=cfg["max_seq_length"],
+        num_train_epochs=cfg["epochs"],
+        train_batch_size=cfg["train_batch_size"],
+        eval_batch_size=cfg["eval_batch_size"],
+        gradient_accumulation_steps=cfg["gradient_accumulation_steps"],
+        learning_rate=cfg["learning_rate"],
+        loss_scale=cfg["loss_scale"],
+        dataloader_num_workers=cfg["dataloader_num_workers"],
+        run_information_retrieval_evaluator=cfg["run_information_retrieval_evaluator"],
     )
 
 

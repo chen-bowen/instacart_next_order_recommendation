@@ -148,7 +148,7 @@ Or with pip: `pip install -e .` (see `pyproject.toml` for dependencies). 3. **Do
 | Component                        | Command / Usage                                                                                      | When to use                                                                               |
 | -------------------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | **Data prep**                    | `uv run python -m src.data.prepare_instacart_sbert`                                                  | First step: build train/eval datasets from raw CSVs                                       |
-| **Train**                        | `uv run python -m src.train.train_sbert --lr 1e-4`                                                   | Train the two-tower SBERT model                                                           |
+| **Train**                        | `uv run python -m src.train.train_sbert`                                                             | Train the two-tower SBERT model (config/train.yaml)                                         |
 | **CLI inference**                | `uv run python -m src.inference --top-k 10`                                                          | One-off recommendations from command line                                                 |
 | **HTTP API**                     | `uv run uvicorn src.api.main:app --port 8000`                                                        | Serve recommendations as a REST API                                                       |
 | **Baselines**                    | `uv run python -m src.baselines --processed-dir processed/p5_mp20_ef0.1`                             | Compare SBERT vs content-based and CF                                                     |
@@ -202,13 +202,13 @@ Data prep writes under a **param-based subdir** of `processed/`, e.g. `processed
 
 Reads the CSVs, builds one **anchor** (user context string) per target order, and for each product in that order’s “next” basket creates a **(anchor, positive)** pair with **positive** = product text. Splits orders into train vs eval (by order, not by pair), and writes the train/eval Datasets plus `eval_queries.json`, `eval_corpus.json`, `eval_relevant_docs.json` for the Information Retrieval evaluator.
 
-**Key flags:** `--max-prior-orders`, `--max-product-names`, `--eval-frac`, `--output-dir`, `--data-dir`. Defaults: 5 prior orders, 20 product names, 10% eval. At the end the script prints the exact `--processed-dir` to use for training.
+**Config:** Edit `config/data_prep.yaml` for `max_prior_orders`, `max_product_names`, `eval_frac`, `data_dir`, `output_dir`, etc. Override with `--config path/to/config.yaml`. At the end the script prints the exact `--processed-dir` to use for training.
 
 ### 2. Train
 
 Loads the processed dir (auto-resolves to a single param subdir under `processed/` if the default path has no `train_dataset`), builds a Sentence Transformer bi-encoder (default base: `all-MiniLM-L6-v2`), and trains with **MultipleNegativesRankingLoss** (in-batch negatives). Optionally runs **InformationRetrievalEvaluator** each epoch (Accuracy@k, MRR@10, NDCG@10, MAP@100). Saves checkpoints under `models/two_tower_sbert/` and, when IR eval is on, keeps the best by NDCG@10 in `models/two_tower_sbert/final/`.
 
-**Key flags:** `--processed-dir`, `--output-dir`, `--lr`, `--epochs`, `--train-batch-size`, `--max-seq-length`, `--no-information-retrieval-evaluator` (faster runs, no IR metrics).
+**Config:** Edit `config/train.yaml` for `processed_dir`, `output_dir`, `learning_rate`, `epochs`, etc. Override with `--config path/to/config.yaml`.
 
 ### 3. Serve (via CLI or FastAPI)
 
@@ -223,17 +223,13 @@ Loads the trained model from either 1) `final/` (or a checkpoint dir) 2) hugging
 # 1. Prepare (writes to processed/p5_mp20_ef0.1/ with defaults)
 uv run python -m src.data.prepare_instacart_sbert
 
-# 2. Train (uses processed/p5_mp20_ef0.1 if it’s the only param subdir)
-uv run python -m src.train.train_sbert --lr 1e-4
-# Explicit dir: --processed-dir processed/p5_mp20_ef0.1
-# Faster training (no IR eval): --no-information-retrieval-evaluator
+# 2. Train (uses config/train.yaml)
+uv run python -m src.train.train_sbert
+# Override: --config config/other.yaml
 
-# 3. Serve (demo: no --query uses built-in example)
-uv run python -m src.inference --top-k 10
-# With corpus and model: --corpus processed/p5_mp20_ef0.1/eval_corpus.json --model-dir models/two_tower_sbert/final
-# Custom query: --query "[+7d w4h14] Milk, Bread."
-# Real eval query: --eval-query-id <order_id>
-uv run python -m src.inference --corpus processed/p5_mp20_ef0.1/eval_corpus.json --eval-query-id 3178496
+# 3. Serve (uses config/inference.yaml; demo query if none in config)
+uv run python -m src.inference
+# Override: --config config/other.yaml
 
 # 4. Serve as an HTTP API (FastAPI) — see API section for endpoints and docs
 uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000

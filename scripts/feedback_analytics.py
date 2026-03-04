@@ -12,12 +12,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
-from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 
+import yaml
+from collections import defaultdict
+
 from src.api.feedback_store import DEFAULT_FEEDBACK_DB_PATH, init_db
+from src.constants import DEFAULT_CONFIG_FEEDBACK_ANALYTICS, ENV_FEEDBACK_DB_PATH, PROJECT_ROOT
 
 
 def _get_db_path() -> Path:
@@ -27,9 +30,7 @@ def _get_db_path() -> Path:
     Returns:
         Path to feedback.db (from FEEDBACK_DB_PATH or default).
     """
-    import os
-
-    value = os.getenv("FEEDBACK_DB_PATH")
+    value = os.getenv(ENV_FEEDBACK_DB_PATH)
     return Path(value) if value else DEFAULT_FEEDBACK_DB_PATH
 
 
@@ -149,43 +150,39 @@ def compute_aggregate_metrics(events: list[tuple]) -> dict[str, float]:
     }
 
 
+def load_config(config_path: Path | None = None) -> dict:
+    """Load feedback analytics config from YAML."""
+    path = Path(config_path) if config_path else DEFAULT_CONFIG_FEEDBACK_ANALYTICS
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    with open(path) as f:
+        raw = yaml.safe_load(f) or {}
+    return {
+        "db_path": raw.get("db_path"),
+        "since": raw.get("since"),
+        "show_funnel_sample": int(raw.get("show_funnel_sample", 3)),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Compute feedback analytics: CTR, add-to-cart rate, purchase rate, per-request funnel"
     )
-    parser.add_argument(
-        "--db-path",
-        type=Path,
-        default=None,
-        help="Path to feedback.db (default: FEEDBACK_DB_PATH or data/feedback.db)",
-    )
-    parser.add_argument(
-        "--since",
-        type=str,
-        default=None,
-        help="Only include events on or after this date (ISO format, e.g. 2025-01-01)",
-    )
-    parser.add_argument(
-        "--show-funnel-sample",
-        type=int,
-        default=3,
-        help="Number of per-request funnels to print as sample (0 to disable)",
-    )
+    parser.add_argument("--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_FEEDBACK_ANALYTICS.relative_to(PROJECT_ROOT)})")
     args = parser.parse_args()
 
-    db_path = args.db_path or _get_db_path()
+    cfg = load_config(args.config)
+    db_path = Path(cfg["db_path"]) if cfg["db_path"] else _get_db_path()
 
     # Ensure DB exists (init_db creates if missing)
-    if args.db_path:
-        import os
-
-        os.environ["FEEDBACK_DB_PATH"] = str(args.db_path)
+    if cfg["db_path"]:
+        os.environ[ENV_FEEDBACK_DB_PATH] = str(cfg["db_path"])
     init_db()
-    db_path = args.db_path or _get_db_path()
+    db_path = Path(cfg["db_path"]) if cfg["db_path"] else _get_db_path()
 
-    events = load_events(db_path, since=args.since)
+    events = load_events(db_path, since=cfg["since"])
     if not events:
-        print(f"No feedback events found in {db_path}" + (f" since {args.since}" if args.since else ""))
+        print(f"No feedback events found in {db_path}" + (f" since {cfg['since']}" if cfg["since"] else ""))
         return
 
     metrics = compute_aggregate_metrics(events)
@@ -201,7 +198,7 @@ def main() -> None:
     funnel = compute_funnel_per_request(events)
     print(f"\n--- Per-request funnel ({len(funnel)} request_ids) ---")
 
-    if args.show_funnel_sample > 0 and funnel:
+    if cfg["show_funnel_sample"] > 0 and funnel:
         # Sort by purchase count descending so full-funnel conversions appear first
         def _funnel_depth(item: tuple) -> tuple:
             req_id, events_by_type = item
@@ -211,7 +208,7 @@ def main() -> None:
             return (-purch, -atc, -click, req_id or "")
 
         sorted_items = sorted(funnel.items(), key=_funnel_depth)
-        for req_id, events_by_type in sorted_items[: args.show_funnel_sample]:
+        for req_id, events_by_type in sorted_items[: cfg["show_funnel_sample"]]:
             imp = len(events_by_type.get("impression", set()))
             click = len(events_by_type.get("click", set()))
             atc = len(events_by_type.get("add_to_cart", set()))

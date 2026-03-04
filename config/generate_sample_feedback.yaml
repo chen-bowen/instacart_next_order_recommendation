@@ -1,0 +1,12 @@
+# Generate sample recommend + feedback requests
+# Run: uv run python scripts/generate_sample_feedback.py
+# Override: uv run python scripts/generate_sample_feedback.py --config config/other.yaml
+
+url: http://localhost:8000
+num_requests: 20
+api_key: null
+
+top_k: 10
+click_rate: 0.15
+atc_rate: 0.4
+purchase_rate: 0.6

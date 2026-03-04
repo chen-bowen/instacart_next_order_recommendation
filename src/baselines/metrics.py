@@ -7,6 +7,8 @@ Accuracy@k, Recall@k, MRR@10, NDCG@10, MAP@100.
 
 from __future__ import annotations
 
+import math
+
 
 def _precision_at_k(relevant: set[str], ranked: list[str], k: int) -> float:
     """
@@ -105,7 +107,6 @@ def _ndcg_at_k(relevant: set[str], ranked: list[str], k: int) -> float:
         return sum(r / __lg(i + 2) for i, r in enumerate(rel_list))
 
     def __lg(x: float) -> float:
-        import math
         return math.log2(x) if x > 0 else 0.0
 
     top_k = ranked[:k]

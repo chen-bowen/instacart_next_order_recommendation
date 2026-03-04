@@ -20,18 +20,16 @@ import sys
 from pathlib import Path
 
 import httpx
+import yaml
 
-from src.constants import DEFAULT_PROCESSED_DIR
+from src.constants import (
+    DEFAULT_CONFIG_GENERATE_SAMPLE_FEEDBACK,
+    DEFAULT_PROCESSED_DIR,
+    EVAL_QUERIES_FILENAME,
+    PROJECT_ROOT,
+    SAMPLE_USER_CONTEXTS,
+)
 from src.utils import resolve_processed_dir
-
-# Sample user contexts when eval_queries.json is not available
-SAMPLE_USER_CONTEXTS = [
-    "[+7d w4h14] Organic Milk, Whole Wheat Bread.",
-    "[+3d w1h9] Banana, Greek Yogurt, Honey.",
-    "[+14d w6h18] Chicken Breast, Broccoli, Rice.",
-    "[+1d w0h12] Coffee, Oat Milk, Granola.",
-    "[+5d w3h20] Pasta, Tomato Sauce, Parmesan.",
-]
 
 
 def load_eval_user_ids(processed_dir: Path, limit: int = 50) -> list[str]:
@@ -45,7 +43,7 @@ def load_eval_user_ids(processed_dir: Path, limit: int = 50) -> list[str]:
     Returns:
         List of user_ids (up to limit), or empty list if file not found.
     """
-    queries_path = processed_dir / "eval_queries.json"
+    queries_path = processed_dir / EVAL_QUERIES_FILENAME
     if not queries_path.exists():
         return []
     try:
@@ -184,71 +182,49 @@ def get_feedbacks(
     resp.raise_for_status()
 
 
+def load_config(config_path: Path | None = None) -> dict:
+    """Load generate sample feedback config from YAML."""
+    path = Path(config_path) if config_path else DEFAULT_CONFIG_GENERATE_SAMPLE_FEEDBACK
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    with open(path) as f:
+        raw = yaml.safe_load(f) or {}
+    return {
+        "url": str(raw.get("url", "http://localhost:8000")),
+        "num_requests": int(raw.get("num_requests", 20)),
+        "api_key": raw.get("api_key"),
+        "top_k": int(raw.get("top_k", 10)),
+        "click_rate": float(raw.get("click_rate", 0.15)),
+        "atc_rate": float(raw.get("atc_rate", 0.4)),
+        "purchase_rate": float(raw.get("purchase_rate", 0.6)),
+    }
+
+
 def main() -> None:
-    # CLI: URL, request count, API key, top-k, and funnel rates
     parser = argparse.ArgumentParser(description="Generate sample recommend + feedback requests to the API")
-    parser.add_argument(
-        "--url",
-        type=str,
-        default="http://localhost:8000",
-        help="API base URL (default: http://localhost:8000)",
-    )
-    parser.add_argument(
-        "--num-requests",
-        type=int,
-        default=20,
-        help="Number of recommend requests to send (default: 20)",
-    )
-    parser.add_argument(
-        "--api-key",
-        type=str,
-        default=None,
-        help="API key if API_KEY env is set on the server",
-    )
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=10,
-        help="Number of recommendations per request (default: 10)",
-    )
-    parser.add_argument(
-        "--click-rate",
-        type=float,
-        default=0.15,
-        help="Fraction of impressions that become clicks (default: 0.15)",
-    )
-    parser.add_argument(
-        "--atc-rate",
-        type=float,
-        default=0.4,
-        help="Fraction of clicks that become add-to-cart (default: 0.4)",
-    )
-    parser.add_argument(
-        "--purchase-rate",
-        type=float,
-        default=0.6,
-        help="Fraction of add-to-cart that become purchases (default: 0.6)",
-    )
+    parser.add_argument("--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_GENERATE_SAMPLE_FEEDBACK.relative_to(PROJECT_ROOT)})")
     args = parser.parse_args()
+
+    cfg = load_config(args.config)
 
     # Resolve processed dir and load eval user_ids so we can call /recommend with real queries
     processed_dir, _ = resolve_processed_dir(DEFAULT_PROCESSED_DIR, DEFAULT_PROCESSED_DIR)
-    user_ids = load_eval_user_ids(processed_dir, limit=args.num_requests)
-    use_user_id = len(user_ids) >= args.num_requests
+    user_ids = load_eval_user_ids(processed_dir, limit=cfg["num_requests"])
+    use_user_id = len(user_ids) >= cfg["num_requests"]
 
     if not use_user_id:
-        print("Note: eval_queries.json not found or too few; using sample user_context strings")
+        print(f"Note: {EVAL_QUERIES_FILENAME} not found or too few; using sample user_context strings")
 
-    # Prefer --api-key over API_KEY env
-    api_key = args.api_key or __import__("os").environ.get("API_KEY")
+    # Prefer config api_key over API_KEY env
+    api_key = cfg["api_key"] or __import__("os").environ.get("API_KEY")
     timeout = httpx.Timeout(60.0)
 
     # Check API is reachable before sending many requests
     try:
         with httpx.Client(timeout=5.0) as c:
-            c.get(f"{args.url}/health")
+            c.get(f"{cfg['url']}/health")
     except httpx.ConnectError:
-        print(f"Error: Cannot connect to {args.url}. Start the API with: uv run uvicorn src.api.main:app --port 8000")
+        print(f"Error: Cannot connect to {cfg['url']}. Start the API with: uv run uvicorn src.api.main:app --port 8000")
         sys.exit(1)
 
     success = 0
@@ -256,22 +232,22 @@ def main() -> None:
 
     # For each request: /recommend then /feedback with simulated funnel
     with httpx.Client(timeout=timeout) as client:
-        for i in range(args.num_requests):
+        for i in range(cfg["num_requests"]):
             user_id = user_ids[i] if use_user_id and i < len(user_ids) else None
             user_context = None if use_user_id else random.choice(SAMPLE_USER_CONTEXTS)
 
             try:
-                request_id, product_ids = post_recommend_request(client, args.url, api_key, use_user_id, user_id, user_context, args.top_k)
+                request_id, product_ids = post_recommend_request(client, cfg["url"], api_key, use_user_id, user_id, user_context, cfg["top_k"])
                 if request_id and product_ids:
                     get_feedbacks(
                         client,
-                        args.url,
+                        cfg["url"],
                         api_key,
                         request_id,
                         product_ids,
-                        click_rate=args.click_rate,
-                        atc_rate=args.atc_rate,
-                        purchase_rate=args.purchase_rate,
+                        click_rate=cfg["click_rate"],
+                        atc_rate=cfg["atc_rate"],
+                        purchase_rate=cfg["purchase_rate"],
                     )
                     success += 1
                 else:

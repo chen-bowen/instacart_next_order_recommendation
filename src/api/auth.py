@@ -8,13 +8,13 @@ endpoints remain unauthenticated for liveness/readiness probes.
 
 from __future__ import annotations
 
+import os
+
 from fastapi import Header, HTTPException, status
 
 
 def _get_expected_api_key() -> str | None:
     """Return the expected API key from env, or None if auth is disabled."""
-    import os
-
     return os.getenv("API_KEY") or None
 
 

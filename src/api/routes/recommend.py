@@ -17,6 +17,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from src.api.auth import verify_api_key
+from src.constants import EVAL_QUERIES_FILENAME
 from src.api.metrics import (
     RECOMMENDATION_ENCODE_SECONDS,
     RECOMMENDATION_LATENCY_SECONDS,
@@ -41,7 +42,7 @@ router = APIRouter()
 
 def _load_eval_queries(corpus_path: Path) -> dict[str, str]:
     """
-    Load eval_queries.json from the same directory as the corpus, if present.
+    Load eval_queries from the same directory as the corpus, if present.
 
     Primarily for demo / offline evaluation; in production a dedicated
     user-context service would supply the query string.
@@ -52,7 +53,7 @@ def _load_eval_queries(corpus_path: Path) -> dict[str, str]:
     Returns:
         Dict mapping query_id (order_id) to user context string, or empty dict.
     """
-    queries_path = corpus_path.parent / "eval_queries.json"
+    queries_path = corpus_path.parent / EVAL_QUERIES_FILENAME
     if not queries_path.exists():
         return {}
     try:
@@ -61,7 +62,7 @@ def _load_eval_queries(corpus_path: Path) -> dict[str, str]:
         if isinstance(data, dict):
             return {str(k): str(v) for k, v in data.items()}
     except (OSError, json.JSONDecodeError):
-        logger.exception("Failed to load eval_queries.json from %s", queries_path)
+        logger.exception("Failed to load %s from %s", EVAL_QUERIES_FILENAME, queries_path)
     return {}
 
 

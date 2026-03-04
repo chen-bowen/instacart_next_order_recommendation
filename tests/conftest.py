@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from src.api.main import app
+from src.constants import ENV_FEEDBACK_DB_PATH
 from src.inference.serve_recommendations import RecommendationMetrics
 
 
@@ -58,10 +60,8 @@ def client(mock_recommender, tmp_path):
     """
     # Use temp path for feedback DB so tests don't touch real data
     db_path = tmp_path / "feedback.db"
-    os.environ["FEEDBACK_DB_PATH"] = str(db_path)
+    os.environ[ENV_FEEDBACK_DB_PATH] = str(db_path)
 
     with patch("src.api.main.load_monitored_recommender", return_value=mock_recommender):
-        from src.api.main import app
-
         with TestClient(app) as c:
             yield c

@@ -10,7 +10,10 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
-import pytest
+from fastapi.testclient import TestClient
+
+from src.api.main import app
+from src.constants import ENV_FEEDBACK_DB_PATH
 
 
 class TestHealthEndpoints:
@@ -94,13 +97,10 @@ class TestApiKeyAuth:
 
     def test_recommend_without_api_key_when_required_returns_401(self, mock_recommender, tmp_path):
         """When API_KEY is set, requests without key should return 401."""
-        os.environ["FEEDBACK_DB_PATH"] = str(tmp_path / "feedback.db")
+        os.environ[ENV_FEEDBACK_DB_PATH] = str(tmp_path / "feedback.db")
         os.environ["API_KEY"] = "secret-test-key"
         try:
             with patch("src.api.main.load_monitored_recommender", return_value=mock_recommender):
-                from fastapi.testclient import TestClient
-                from src.api.main import app
-
                 with TestClient(app) as c:
                     resp = c.post(
                         "/recommend",
@@ -112,13 +112,10 @@ class TestApiKeyAuth:
 
     def test_recommend_with_api_key_when_required_returns_200(self, mock_recommender, tmp_path):
         """When API_KEY is set, requests with valid key should succeed."""
-        os.environ["FEEDBACK_DB_PATH"] = str(tmp_path / "feedback.db")
+        os.environ[ENV_FEEDBACK_DB_PATH] = str(tmp_path / "feedback.db")
         os.environ["API_KEY"] = "secret-test-key"
         try:
             with patch("src.api.main.load_monitored_recommender", return_value=mock_recommender):
-                from fastapi.testclient import TestClient
-                from src.api.main import app
-
                 with TestClient(app) as c:
                     resp = c.post(
                         "/recommend",

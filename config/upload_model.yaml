@@ -1,0 +1,8 @@
+# Upload model to Hugging Face Hub
+# Run: uv run python scripts/upload_model_to_hf.py
+# Override: uv run python scripts/upload_model_to_hf.py --config config/other.yaml
+# Set repo_id below or pass --repo-id for one-off override
+
+repo_id: null  # Required: e.g. YOUR_USERNAME/instacart-two-tower-sbert
+model_dir: models/two_tower_sbert/final
+private: false

@@ -1,0 +1,11 @@
+# Baselines config (content-based SBERT, item-item CF)
+# Run: uv run python -m src.baselines
+# Override: uv run python -m src.baselines --config config/other.yaml
+
+processed_dir: processed
+data_dir: data
+
+model_name: sentence-transformers/all-MiniLM-L6-v2
+
+content_only: false  # Run only content-based (faster)
+cf_only: false  # Run only CF baseline

@@ -86,4 +86,3 @@ async def feedback_endpoint(
         {r.event_type for r in records},
     )
     return {"status": "accepted", "count": len(records)}
-

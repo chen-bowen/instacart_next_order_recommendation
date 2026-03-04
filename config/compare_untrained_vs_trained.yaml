@@ -1,0 +1,10 @@
+# Compare untrained vs trained SBERT
+# Run: uv run python scripts/compare_untrained_vs_trained.py
+# Override: uv run python scripts/compare_untrained_vs_trained.py --config config/other.yaml
+
+processed_dir: processed
+model_dir: models/two_tower_sbert/final
+base_model: sentence-transformers/all-MiniLM-L6-v2
+
+batch_size: 64
+sample_queries: null  # If set, use random subset for faster run

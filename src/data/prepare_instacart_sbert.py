@@ -16,15 +16,34 @@ import logging
 from collections import defaultdict
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
+import yaml
 import pandas as pd
 from datasets import Dataset
 
-from src.constants import DEFAULT_DATA_DIR, DEFAULT_PROCESSED_DIR
+from src.constants import (
+    AISLES_CSV,
+    DATA_PREP_PARAMS_FILENAME,
+    DEFAULT_CONFIG_DATA_PREP,
+    DEFAULT_DATA_DIR,
+    DEFAULT_PROCESSED_DIR,
+    DEPARTMENTS_CSV,
+    EVAL_CORPUS_FILENAME,
+    EVAL_QUERIES_FILENAME,
+    EVAL_RELEVANT_DOCS_FILENAME,
+    EVAL_DATASET_SUBDIR,
+    EVAL_SET_PRIOR,
+    EVAL_SET_TRAIN,
+    ORDER_PRODUCTS_CHUNK_SIZE,
+    ORDER_PRODUCTS_PRIOR_CSV,
+    ORDER_PRODUCTS_TRAIN_CSV,
+    ORDERS_CSV,
+    PRODUCTS_CSV,
+    PROJECT_ROOT,
+    TRAIN_DATASET_SUBDIR,
+)
 from src.utils import setup_colored_logging
 
-CHUNK_SIZE = 500_000  # for reading order_products__prior.csv
+logger = logging.getLogger(__name__)
 
 
 def load_product_text_map(
@@ -89,7 +108,7 @@ def load_orders(orders_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
             orders["order_hour_of_day"].astype(str).str.zfill(2)
         )
     # Rows where we have a "next order" to predict; keep columns needed for context and split.
-    target_orders = orders[orders["eval_set"] == "train"][
+    target_orders = orders[orders["eval_set"] == EVAL_SET_TRAIN][
         [
             "order_id",
             "user_id",
@@ -101,7 +120,7 @@ def load_orders(orders_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     ].copy()
     # Rows that are historical orders (used only to build user context).
     # Keep dow / hour / days_since_prior_order so temporal patterns between orders are available.
-    history_orders = orders[orders["eval_set"] == "prior"][
+    history_orders = orders[orders["eval_set"] == EVAL_SET_PRIOR][
         [
             "order_id",
             "user_id",
@@ -117,7 +136,7 @@ def load_orders(orders_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
 def build_order_to_products(
     order_products_prior_path: Path,
     history_order_ids: set[int],
-    chunk_size: int = CHUNK_SIZE,
+    chunk_size: int = ORDER_PRODUCTS_CHUNK_SIZE,
 ) -> dict[int, list[int]]:
     """
     Build a mapping from each history order_id to the list of product_ids in that order.
@@ -129,7 +148,7 @@ def build_order_to_products(
     Args:
         order_products_prior_path: Path to order_products__prior.csv.
         history_order_ids: Set of order_ids to include (typically history orders for our users).
-        chunk_size: Number of rows per chunk when reading the CSV.
+        chunk_size: Number of rows per chunk when reading the CSV (default: ORDER_PRODUCTS_CHUNK_SIZE).
 
     Returns:
         Dict mapping order_id (int) to list of product_id (int) in that order.
@@ -386,12 +405,12 @@ def run(
 
     logger.info("[Step 1/7] Loading product text map...")
     # Paths to all input CSVs.
-    products_path = data_dir / "products.csv"
-    aisles_path = data_dir / "aisles.csv"
-    departments_path = data_dir / "departments.csv"
-    orders_path = data_dir / "orders.csv"
-    order_products_prior_path = data_dir / "order_products__prior.csv"
-    order_products_train_path = data_dir / "order_products__train.csv"
+    products_path = data_dir / PRODUCTS_CSV
+    aisles_path = data_dir / AISLES_CSV
+    departments_path = data_dir / DEPARTMENTS_CSV
+    orders_path = data_dir / ORDERS_CSV
+    order_products_prior_path = data_dir / ORDER_PRODUCTS_PRIOR_CSV
+    order_products_train_path = data_dir / ORDER_PRODUCTS_TRAIN_CSV
 
     # Step 1: product_id -> product text (for item tower).
     product_text_map = load_product_text_map(
@@ -505,14 +524,14 @@ def run(
 
     # Save all outputs to effective_output_dir (param-based subdir).
     logger.info("[Step 7/7] Saving outputs to %s...", effective_output_dir)
-    train_dataset.save_to_disk(str(effective_output_dir / "train_dataset"))
+    train_dataset.save_to_disk(str(effective_output_dir / TRAIN_DATASET_SUBDIR))
     if eval_dataset is not None:
-        eval_dataset.save_to_disk(str(effective_output_dir / "eval_dataset"))
-    with open(effective_output_dir / "eval_queries.json", "w") as f:
+        eval_dataset.save_to_disk(str(effective_output_dir / EVAL_DATASET_SUBDIR))
+    with open(effective_output_dir / EVAL_QUERIES_FILENAME, "w") as f:
         json.dump(eval_queries, f, indent=0)
-    with open(effective_output_dir / "eval_corpus.json", "w") as f:
+    with open(effective_output_dir / EVAL_CORPUS_FILENAME, "w") as f:
         json.dump(eval_corpus, f, indent=0)
-    with open(effective_output_dir / "eval_relevant_docs.json", "w") as f:
+    with open(effective_output_dir / EVAL_RELEVANT_DOCS_FILENAME, "w") as f:
         json.dump({k: list(v) for k, v in eval_relevant_docs.items()}, f, indent=0)
 
     data_prep_params = {
@@ -530,7 +549,7 @@ def run(
         "n_eval_queries": len(eval_queries),
         "n_corpus": len(eval_corpus),
     }
-    with open(effective_output_dir / "data_prep_params.json", "w") as f:
+    with open(effective_output_dir / DATA_PREP_PARAMS_FILENAME, "w") as f:
         json.dump(data_prep_params, f, indent=2)
 
     logger.info("Done. Saved to %s", effective_output_dir)
@@ -541,91 +560,90 @@ def run(
     return train_dataset, eval_dataset, eval_queries, eval_corpus, eval_relevant_docs
 
 
+def load_config(config_path: Path | None = None) -> dict:
+    """
+    Load data prep config from YAML. Paths are resolved relative to PROJECT_ROOT.
+
+    Args:
+        config_path: Path to config file. Default: config/data_prep.yaml.
+
+    Returns:
+        Config dict with resolved paths and typed values.
+    """
+    path = Path(config_path) if config_path else DEFAULT_CONFIG_DATA_PREP
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    with open(path) as f:
+        raw = yaml.safe_load(f) or {}
+
+    # Resolve paths relative to PROJECT_ROOT
+    data_dir = raw.get("data_dir", str(DEFAULT_DATA_DIR))
+    output_dir = raw.get("output_dir", str(DEFAULT_PROCESSED_DIR))
+    if not Path(data_dir).is_absolute():
+        data_dir = PROJECT_ROOT / data_dir
+    if not Path(output_dir).is_absolute():
+        output_dir = PROJECT_ROOT / output_dir
+
+    sample_frac = raw.get("sample_frac")
+    if sample_frac is not None:
+        sample_frac = float(sample_frac)
+    max_target_orders = raw.get("max_target_orders")
+    if max_target_orders is not None:
+        max_target_orders = int(max_target_orders)
+
+    return {
+        "data_dir": Path(data_dir),
+        "output_dir": Path(output_dir),
+        "max_prior_orders": int(raw.get("max_prior_orders", 5)),
+        "max_product_names": int(raw.get("max_product_names", 20)),
+        "sample_frac": sample_frac,
+        "eval_frac": float(raw.get("eval_frac", 0.1)),
+        "eval_serve_time": bool(raw.get("eval_serve_time", True)),
+        "max_target_orders": max_target_orders,
+        "seed": int(raw.get("seed", 42)),
+    }
+
+
 def main() -> None:
     """
-    CLI entrypoint: parse arguments, call run(), and print summary.
+    CLI entrypoint: load config from YAML, call run(), and print summary.
+
+    Uses config/data_prep.yaml by default. Override with --config path/to/config.yaml.
     """
-    parser = argparse.ArgumentParser(
-        description="Prepare Instacart data for two-tower SBERT training"
-    )
-    parser.add_argument(
-        "--data-dir", type=Path, default=DEFAULT_DATA_DIR, help="Path to data/ folder"
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_PROCESSED_DIR,
-        help="Path to save processed datasets",
-    )
-    parser.add_argument(
-        "--max-prior-orders",
-        type=int,
-        default=5,
-        help="Max prior orders per user context (default 5 for faster training)",
-    )
-    parser.add_argument(
-        "--max-product-names",
-        type=int,
-        default=20,
-        help="Max product names in user context (default 20 for faster training)",
-    )
-    parser.add_argument(
-        "--sample-frac",
-        type=float,
-        default=None,
-        help="Fraction of train pairs to keep (e.g. 0.2)",
-    )
-    parser.add_argument(
-        "--eval-frac",
-        type=float,
-        default=0.1,
-        help="Fraction of orders for eval (Information retrieval evaluator)",
-    )
-    parser.add_argument(
-        "--no-eval-serve-time",
-        action="store_true",
-        help="Keep 'Next: ...' in eval queries (matches training anchor; eval is optimistic). Default: strip it so eval matches production.",
-    )
-    parser.add_argument(
-        "--max-target-orders",
-        type=int,
-        default=None,
-        help="Limit target orders (for quick runs)",
-    )
-    parser.add_argument("--seed", type=int, default=42)
+    parser = argparse.ArgumentParser(description="Prepare Instacart data for two-tower SBERT training")
+    parser.add_argument("--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_DATA_PREP.relative_to(PROJECT_ROOT)})")
     args = parser.parse_args()
+
+    cfg = load_config(args.config)
 
     setup_colored_logging(
         quiet_loggers=["httpx", "httpcore", "huggingface_hub", "urllib3", "datasets"],
     )
 
     train_ds, eval_ds, eq, ec, er = run(
-        data_dir=args.data_dir,
-        output_dir=args.output_dir,
-        max_prior_orders=args.max_prior_orders,
-        max_product_names=args.max_product_names,
-        sample_frac=args.sample_frac,
-        eval_frac=args.eval_frac,
-        eval_serve_time=not args.no_eval_serve_time,
-        max_target_orders=args.max_target_orders,
-        seed=args.seed,
+        data_dir=cfg["data_dir"],
+        output_dir=cfg["output_dir"],
+        max_prior_orders=cfg["max_prior_orders"],
+        max_product_names=cfg["max_product_names"],
+        sample_frac=cfg["sample_frac"],
+        eval_frac=cfg["eval_frac"],
+        eval_serve_time=cfg["eval_serve_time"],
+        max_target_orders=cfg["max_target_orders"],
+        seed=cfg["seed"],
     )
     logger.info("Train dataset size: %d", len(train_ds))
     if eval_ds is not None:
         logger.info("Eval dataset size: %d", len(eval_ds))
     logger.info("Eval queries: %d, corpus size: %d", len(eq), len(ec))
-    logger.info(
-        "Saved to %s/%s",
-        args.output_dir,
-        _params_subdir(
-            args.max_prior_orders,
-            args.max_product_names,
-            args.eval_frac,
-            not args.no_eval_serve_time,
-            args.sample_frac,
-            args.max_target_orders,
-        ),
+    subdir = _params_subdir(
+        cfg["max_prior_orders"],
+        cfg["max_product_names"],
+        cfg["eval_frac"],
+        cfg["eval_serve_time"],
+        cfg["sample_frac"],
+        cfg["max_target_orders"],
     )
+    logger.info("Saved to %s/%s", cfg["output_dir"], subdir)
 
 
 if __name__ == "__main__":

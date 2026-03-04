@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
-from src.constants import PROJECT_ROOT
-
-
-DEFAULT_FEEDBACK_DB_PATH = PROJECT_ROOT / "data" / "feedback.db"
+from src.constants import DEFAULT_FEEDBACK_DB_PATH, ENV_FEEDBACK_DB_PATH
 
 
 def _get_db_path() -> Path:
@@ -22,11 +20,8 @@ def _get_db_path() -> Path:
     Returns:
         Path to the feedback database file.
     """
-    env_path = Path(str(Path.cwd()))  # placeholder to avoid mypy complaints if os is missing
     try:
-        import os
-
-        value = os.getenv("FEEDBACK_DB_PATH")
+        value = os.getenv(ENV_FEEDBACK_DB_PATH)
         if value:
             return Path(value)
     except Exception:
@@ -190,4 +185,3 @@ def record_events(events: Iterable[FeedbackEventRecord]) -> None:
         conn.commit()
     finally:
         conn.close()
-

@@ -31,10 +31,15 @@ from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.util import cos_sim
 
+import yaml
+
 from src.constants import (
+    DEFAULT_CONFIG_INFERENCE,
     DEFAULT_CORPUS_PATH,
+    DEFAULT_DOTENV_PATH,
     DEFAULT_MODEL_DIR,
     EMBEDDINGS_FILENAME,
+    EVAL_QUERIES_FILENAME,
     INDEX_SUBDIR,
     MANIFEST_FILENAME,
     PRODUCT_IDS_FILENAME,
@@ -42,7 +47,7 @@ from src.constants import (
 )
 
 logger = logging.getLogger(__name__)
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(DEFAULT_DOTENV_PATH)
 
 
 def get_inference_device() -> str:
@@ -505,66 +510,72 @@ def recommend(
     return rec.recommend(query=query, top_k=top_k)
 
 
+def load_config(config_path: Path | None = None) -> dict:
+    """Load inference config from YAML."""
+    path = Path(config_path) if config_path else DEFAULT_CONFIG_INFERENCE
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    with open(path) as f:
+        raw = yaml.safe_load(f) or {}
+
+    def resolve(p: str | None) -> Path:
+        if not p:
+            return DEFAULT_CORPUS_PATH
+        return PROJECT_ROOT / p if not Path(p).is_absolute() else Path(p)
+
+    model_dir = raw.get("model_dir", str(DEFAULT_MODEL_DIR))
+    if model_dir:
+        p = Path(str(model_dir))
+        if not p.is_absolute():
+            local = PROJECT_ROOT / model_dir
+            model_dir = local if local.exists() else model_dir
+        else:
+            model_dir = p
+
+    return {
+        "model_dir": model_dir,
+        "corpus": resolve(raw.get("corpus")),
+        "use_index": bool(raw.get("use_index", True)),
+        "query": raw.get("query"),
+        "eval_query_id": raw.get("eval_query_id"),
+        "top_k": int(raw.get("top_k", 10)),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve product recommendations")
-    parser.add_argument(
-        "--model-dir",
-        type=Path,
-        default=DEFAULT_MODEL_DIR,
-        help="Path to trained model or Hugging Face model ID (e.g. username/repo-name)",
-    )
-    parser.add_argument(
-        "--corpus",
-        type=Path,
-        default=DEFAULT_CORPUS_PATH,
-        help="Path to eval_corpus.json",
-    )
-    parser.add_argument(
-        "--no-index",
-        action="store_true",
-        help="Disable loading/saving product embedding index (recompute embeddings every time)",
-    )
-    parser.add_argument(
-        "--query",
-        type=str,
-        default=None,
-        help="User context string for recommendations",
-    )
-    parser.add_argument(
-        "--eval-query-id",
-        type=str,
-        default=None,
-        help="Use query from eval_queries.json by ID",
-    )
-    parser.add_argument("--top-k", type=int, default=10, help="Number of recommendations to return")
+    parser.add_argument("--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_INFERENCE.relative_to(PROJECT_ROOT)})")
     args = parser.parse_args()
+
+    cfg = load_config(args.config)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+    model_dir = cfg["model_dir"] if isinstance(cfg["model_dir"], Path) else Path(str(cfg["model_dir"]))
     rec = load_recommender(
-        model_dir=args.model_dir,
-        corpus_path=args.corpus,
-        use_index=not args.no_index,
+        model_dir=model_dir,
+        corpus_path=cfg["corpus"],
+        use_index=cfg["use_index"],
     )
 
-    if args.eval_query_id:
-        queries_path = args.corpus.parent / "eval_queries.json"
+    if cfg["eval_query_id"]:
+        queries_path = cfg["corpus"].parent / EVAL_QUERIES_FILENAME
         with open(queries_path, "r") as f:
             eval_queries = json.load(f)
-        if args.eval_query_id not in eval_queries:
-            raise KeyError(f"eval_query_id {args.eval_query_id} not in {queries_path}")
-        query = eval_queries[args.eval_query_id]
-        print(f"Query (eval_id={args.eval_query_id}):\n  {query[:200]}...\n")
-    elif args.query:
-        query = args.query
+        if cfg["eval_query_id"] not in eval_queries:
+            raise KeyError(f"eval_query_id {cfg['eval_query_id']} not in {queries_path}")
+        query = eval_queries[cfg["eval_query_id"]]
+        print(f"Query (eval_id={cfg['eval_query_id']}):\n  {query[:200]}...\n")
+    elif cfg["query"]:
+        query = cfg["query"]
         print(f"Query:\n  {query}\n")
     else:
         query = "[+7d w4h14] Organic Milk, Whole Wheat Bread."
-        print("No --query or --eval-query-id given. Using demo query (past orders only):\n")
+        print("No query or eval_query_id in config. Using demo query (past orders only):\n")
         print(f"  {query}\n")
 
-    results = rec.recommend(query=query, top_k=args.top_k)
-    print(f"Top-{args.top_k} recommendations:")
+    results = rec.recommend(query=query, top_k=cfg["top_k"])
+    print(f"Top-{cfg['top_k']} recommendations:")
     for i, (pid, score) in enumerate(results, 1):
         text = rec.pid_to_text[pid]
         print(f"  {i}. product_id={pid} (score={score:.4f}) {text}")
