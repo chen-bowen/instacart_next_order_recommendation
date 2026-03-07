@@ -1,0 +1,20 @@
+# Data preparation config for Instacart two-tower SBERT training
+# Run: uv run python -m src.data.prepare_instacart_sbert
+# Override: uv run python -m src.data.prepare_instacart_sbert --config configs/other.yaml
+
+# Input/output paths (relative to project root)
+data_dir: data
+output_dir: processed
+
+# User context: max prior orders to include, max product names per order
+max_prior_orders: 5
+max_product_names: 20
+
+# Train/eval split: eval_frac of orders go to eval; eval_serve_time strips "Next: ..." for production-like queries
+sample_frac: null # Optional: e.g. 0.2 to subsample train pairs for quick runs
+eval_frac: 0.1
+eval_serve_time: true # Strip "Next: ..." from eval queries (matches production)
+
+# Optional: limit target orders for quick runs
+max_target_orders: null
+seed: 42

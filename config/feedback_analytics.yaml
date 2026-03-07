@@ -1,7 +1,0 @@
-# Feedback analytics config
-# Run: uv run python scripts/feedback_analytics.py
-# Override: uv run python scripts/feedback_analytics.py --config config/other.yaml
-
-db_path: null  # null = FEEDBACK_DB_PATH or data/feedback.db
-since: null  # ISO date; only events on or after
-show_funnel_sample: 3

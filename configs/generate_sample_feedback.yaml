@@ -1,0 +1,14 @@
+# Generate sample recommend + feedback requests
+# Run: uv run python scripts/generate_sample_feedback.py
+# Start API first: uv run uvicorn src.api.main:app --port 8000
+
+url: http://localhost:8000
+num_requests: 20
+api_key: null # Or set when API_KEY env is used
+
+# top_k: recommendations per request
+# click_rate: fraction of impressions -> clicks; atc_rate: clicks -> add_to_cart; purchase_rate: add_to_cart -> purchase
+top_k: 10
+click_rate: 0.15
+atc_rate: 0.4
+purchase_rate: 0.6

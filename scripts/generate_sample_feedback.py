@@ -183,7 +183,7 @@ def get_feedbacks(
 
 
 def load_config(config_path: Path | None = None) -> dict:
-    """Load generate sample feedback config from YAML."""
+    """Load generate sample feedback config from YAML. Returns url, num_requests, api_key, top_k, rates."""
     path = Path(config_path) if config_path else DEFAULT_CONFIG_GENERATE_SAMPLE_FEEDBACK
     if not path.is_absolute():
         path = PROJECT_ROOT / path
@@ -201,6 +201,7 @@ def load_config(config_path: Path | None = None) -> dict:
 
 
 def main() -> None:
+    """CLI entrypoint: send num_requests recommend+feedback cycles to API with simulated conversion funnels."""
     parser = argparse.ArgumentParser(description="Generate sample recommend + feedback requests to the API")
     parser.add_argument("--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_GENERATE_SAMPLE_FEEDBACK.relative_to(PROJECT_ROOT)})")
     args = parser.parse_args()

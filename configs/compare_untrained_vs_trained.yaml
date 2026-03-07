@@ -2,9 +2,12 @@
 # Run: uv run python scripts/compare_untrained_vs_trained.py
 # Override: uv run python scripts/compare_untrained_vs_trained.py --config config/other.yaml
 
+# processed_dir: from data prep; model_dir: trained checkpoint
 processed_dir: processed
 model_dir: models/two_tower_sbert/final
+# base_model: pretrained model for "untrained" comparison (must match training base)
 base_model: sentence-transformers/all-MiniLM-L6-v2
 
 batch_size: 64
-sample_queries: null  # If set, use random subset for faster run
+# sample_queries: if set, use random subset for faster run
+sample_queries: null

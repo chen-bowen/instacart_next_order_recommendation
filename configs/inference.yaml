@@ -1,0 +1,17 @@
+# CLI inference config
+# Run: uv run python -m src.inference
+# Override: uv run python -m src.inference --config config/other.yaml
+
+# Model: local path or Hugging Face model ID (e.g. chenbowen184/instacart-two-tower-sbert)
+model_dir: models/two_tower_sbert/final
+# Corpus: product_id -> text map from data prep (eval_corpus.json)
+corpus: processed/p5_mp20_ef0.1/eval_corpus.json
+
+# use_index: cache product embeddings on disk for faster startup
+use_index: true
+
+# Query: user context string; null = use built-in demo
+# eval_query_id: use query from eval_queries.json by order_id
+query: null
+eval_query_id: null
+top_k: 10

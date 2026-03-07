@@ -1,4 +1,9 @@
-"""Shared path and other constants for the Instacart personalization project."""
+"""
+Shared path and other constants for the Instacart personalization project.
+
+Centralizes file paths, config locations, and magic strings used across
+data prep, training, inference, baselines, and API.
+"""
 
 from __future__ import annotations
 
@@ -7,13 +12,13 @@ from pathlib import Path
 # Repository root (parent of src/)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-# Environment
+# Environment: .env file and feedback DB path override
 DOTENV_FILENAME = ".env"
 DEFAULT_DOTENV_PATH = PROJECT_ROOT / DOTENV_FILENAME
 ENV_FEEDBACK_DB_PATH = "FEEDBACK_DB_PATH"
 
 # Config files (YAML)
-CONFIG_DIR = PROJECT_ROOT / "config"
+CONFIG_DIR = PROJECT_ROOT / "configs"
 DEFAULT_CONFIG_DATA_PREP = CONFIG_DIR / "data_prep.yaml"
 DEFAULT_CONFIG_TRAIN = CONFIG_DIR / "train.yaml"
 DEFAULT_CONFIG_INFERENCE = CONFIG_DIR / "inference.yaml"
@@ -23,7 +28,7 @@ DEFAULT_CONFIG_FEEDBACK_ANALYTICS = CONFIG_DIR / "feedback_analytics.yaml"
 DEFAULT_CONFIG_UPLOAD_MODEL = CONFIG_DIR / "upload_model.yaml"
 DEFAULT_CONFIG_GENERATE_SAMPLE_FEEDBACK = CONFIG_DIR / "generate_sample_feedback.yaml"
 
-# Data prep: input data and output (param-based subdirs go under DEFAULT_PROCESSED_DIR)
+# Data prep: input CSVs under data_dir; output goes to processed/<param_subdir>/
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_PROCESSED_DIR = PROJECT_ROOT / "processed"
 

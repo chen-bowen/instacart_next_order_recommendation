@@ -17,7 +17,7 @@ from src.constants import ENV_FEEDBACK_DB_PATH
 
 
 class TestHealthEndpoints:
-    """Tests for liveness and readiness probes."""
+    """Tests for liveness (/health) and readiness (/ready) probes."""
 
     def test_health_returns_ok(self, client):
         """GET /health should always return status=ok when process is up."""
@@ -38,7 +38,7 @@ class TestHealthEndpoints:
 
 
 class TestRecommendEndpoint:
-    """Tests for POST /recommend."""
+    """Tests for POST /recommend: validation, user_context, exclude_product_ids."""
 
     def test_recommend_with_user_context_returns_200(self, client):
         """Valid user_context should return recommendations and request_id."""
@@ -100,7 +100,7 @@ class TestApiKeyAuth:
         os.environ[ENV_FEEDBACK_DB_PATH] = str(tmp_path / "feedback.db")
         os.environ["API_KEY"] = "secret-test-key"
         try:
-            with patch("src.api.main.load_monitored_recommender", return_value=mock_recommender):
+            with patch("src.api.main.MonitoredRecommender", return_value=mock_recommender):
                 with TestClient(app) as c:
                     resp = c.post(
                         "/recommend",
@@ -115,7 +115,7 @@ class TestApiKeyAuth:
         os.environ[ENV_FEEDBACK_DB_PATH] = str(tmp_path / "feedback.db")
         os.environ["API_KEY"] = "secret-test-key"
         try:
-            with patch("src.api.main.load_monitored_recommender", return_value=mock_recommender):
+            with patch("src.api.main.MonitoredRecommender", return_value=mock_recommender):
                 with TestClient(app) as c:
                     resp = c.post(
                         "/recommend",
@@ -128,7 +128,7 @@ class TestApiKeyAuth:
 
 
 class TestFeedbackEndpoint:
-    """Tests for POST /feedback."""
+    """Tests for POST /feedback: single event, batch, validation."""
 
     def test_feedback_single_event_returns_202(self, client):
         """Single feedback event should be accepted with 202."""
@@ -171,7 +171,7 @@ class TestFeedbackEndpoint:
 
 
 class TestMetricsEndpoint:
-    """Tests for GET /metrics (Prometheus)."""
+    """Tests for GET /metrics: Prometheus format and expected counters."""
 
     def test_metrics_returns_200(self, client):
         """GET /metrics should return Prometheus format."""

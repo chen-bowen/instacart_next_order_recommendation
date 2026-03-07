@@ -1,16 +1,14 @@
 """
 Serve product recommendations using the trained two-tower SBERT model.
 
-Inference is embedding-based (no text generation):
+Inference is embedding-based:
   - We encode the user context string and each product's text with the same SentenceTransformer.
   - Recommendations are the top-k products by cosine similarity between query and product embeddings.
   - One shared encoder is used for both "towers" (query and document); there is no model.generate().
 
 Usage:
-  # Run inference: python -m src.inference
-  python -m src.inference --model-dir models/two_tower_sbert/final --corpus processed/p5_mp20_ef0.1/eval_corpus.json
-  # Or use as a module:
-  from src.inference.serve_recommendations import load_recommender, recommend
+  rec = Recommender(model_dir=..., corpus_path=...)
+  results = rec.recommend(query="...", top_k=10)
 """
 
 from __future__ import annotations
@@ -50,139 +48,6 @@ logger = logging.getLogger(__name__)
 load_dotenv(DEFAULT_DOTENV_PATH)
 
 
-def get_inference_device() -> str:
-    """
-    Return the best available device for inference: cuda > mps > cpu.
-
-    Override with INFERENCE_DEVICE env var (e.g. INFERENCE_DEVICE=cpu).
-
-    Returns:
-        Device string: "cuda", "mps", or "cpu".
-    """
-    override = os.getenv("INFERENCE_DEVICE")
-    if override:
-        return override
-    if torch.cuda.is_available():
-        return "cuda"
-    if getattr(torch.backends.mps, "is_available", lambda: False)():
-        return "mps"
-    return "cpu"
-
-
-def embedding_index_dir(corpus_path: Path, model_dir: Path | str) -> Path:
-    """
-    Directory for cached product embeddings; one cache per (model_dir, corpus_path) pair.
-
-    Args:
-        corpus_path: Path to the corpus JSON.
-        model_dir: Model directory or Hugging Face model ID.
-
-    Returns:
-        Path to the index subdirectory under the corpus parent.
-    """
-    canonical = f"{model_dir!s}|{corpus_path.resolve()!s}"
-    name = hashlib.sha256(canonical.encode()).hexdigest()[:16]
-    return Path(corpus_path).parent / INDEX_SUBDIR / name
-
-
-def load_embedding_index(
-    index_dir: Path, corpus_path: Path, model_dir: Path | str
-) -> tuple[np.ndarray, list[str]] | None:
-    """
-    Load cached product embeddings if manifest matches current corpus and model.
-
-    Args:
-        index_dir: Directory containing the cached index.
-        corpus_path: Path to the corpus JSON.
-        model_dir: Model directory or Hugging Face model ID.
-
-    Returns:
-        (embeddings, product_ids) on cache hit, None on miss or invalid cache.
-    """
-    manifest_path = index_dir / MANIFEST_FILENAME
-    if not manifest_path.exists():
-        return None
-    try:
-        with open(manifest_path, "r") as f:
-            meta = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return None
-    corpus_resolved = str(Path(corpus_path).resolve())
-    model_resolved = str(model_dir)
-    try:
-        if meta.get("corpus_path") != corpus_resolved or meta.get("model_dir") != model_resolved:
-            return None
-        if meta.get("corpus_mtime") != Path(corpus_path).stat().st_mtime:
-            return None
-    except OSError:
-        return None
-    emb_path = index_dir / EMBEDDINGS_FILENAME
-    ids_path = index_dir / PRODUCT_IDS_FILENAME
-    if not emb_path.exists() or not ids_path.exists():
-        return None
-    try:
-        embeddings = np.load(emb_path)
-        with open(ids_path, "r") as f:
-            product_ids = json.load(f)
-    except (OSError, ValueError):
-        return None
-    if len(product_ids) != len(embeddings):
-        return None
-    return embeddings, product_ids
-
-
-def save_embedding_index(
-    index_dir: Path,
-    corpus_path: Path,
-    model_dir: Path | str,
-    product_ids: list[str],
-    embeddings: np.ndarray,
-) -> None:
-    """
-    Write manifest, embeddings, and product_ids to disk for later loading.
-
-    Args:
-        index_dir: Directory to write the index into.
-        corpus_path: Path to the corpus JSON (for manifest).
-        model_dir: Model directory or Hugging Face model ID (for manifest).
-        product_ids: List of product IDs in same order as embeddings.
-        embeddings: Product embeddings array.
-    """
-    index_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        mtime = Path(corpus_path).stat().st_mtime
-    except OSError:
-        mtime = 0
-    manifest = {
-        "corpus_path": str(Path(corpus_path).resolve()),
-        "model_dir": str(model_dir),
-        "corpus_mtime": mtime,
-        "n_products": len(product_ids),
-    }
-    with open(index_dir / MANIFEST_FILENAME, "w") as f:
-        json.dump(manifest, f, indent=2)
-    np.save(index_dir / EMBEDDINGS_FILENAME, embeddings.astype(np.float32))
-    with open(index_dir / PRODUCT_IDS_FILENAME, "w") as f:
-        json.dump(product_ids, f)
-    logger.info("Saved embedding index to %s (%d products)", index_dir, len(product_ids))
-
-
-def normalize_model_dir(model_dir: Path | str) -> Path | str:
-    """
-    Resolve local paths for stable cache keys; leave Hugging Face model IDs unchanged.
-
-    Args:
-        model_dir: Local path or Hub model ID (e.g. username/repo-name).
-
-    Returns:
-        Resolved Path if local path exists, otherwise unchanged (Path or str) for Hub ID.
-    """
-    p = Path(model_dir)
-    if p.exists():
-        return p.resolve()
-    return p
-
-
 @dataclass
 class RecommendationMetrics:
     """Metrics logged per recommendation request."""
@@ -197,28 +62,77 @@ class RecommendationMetrics:
     timestamp: float
 
 
-def load_corpus(corpus_path: Path) -> tuple[list[str], list[str]]:
-    """
-    Load product corpus from JSON: {product_id: product_text}.
+class EmbeddingIndex:
+    """Manages cached product embeddings on disk. Cache keyed by corpus_path + model_dir + corpus mtime."""
 
-    Args:
-        corpus_path: Path to the corpus JSON file.
+    def __init__(self, corpus_path: Path, model_dir: Path | str):
+        """Initialize index; index dir is under corpus parent / .embedding_index / <hash>."""
+        self.corpus_path = Path(corpus_path).resolve()
+        self.model_dir = model_dir
+        self._dir = self._index_dir()
 
-    Returns:
-        Tuple of (product_ids, product_texts) in matching order.
-    """
-    with open(corpus_path, "r") as f:
-        corpus = json.load(f)
-    ids = list(corpus.keys())
-    texts = [corpus[pid] for pid in ids]
-    return ids, texts
+    def _index_dir(self) -> Path:
+        """Compute cache directory from hash of model_dir and corpus_path."""
+        canonical = f"{self.model_dir!s}|{self.corpus_path!s}"
+        name = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+        return self.corpus_path.parent / INDEX_SUBDIR / name
+
+    def load(self, product_ids: list[str]) -> np.ndarray | None:
+        """Load cached embeddings if manifest matches. Returns None on miss."""
+        manifest_path = self._dir / MANIFEST_FILENAME
+        if not manifest_path.exists():
+            return None
+        try:
+            with open(manifest_path) as f:
+                meta = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return None
+        if meta.get("corpus_path") != str(self.corpus_path) or meta.get("model_dir") != str(self.model_dir):
+            return None
+        try:
+            if meta.get("corpus_mtime") != self.corpus_path.stat().st_mtime:
+                return None
+        except OSError:
+            return None
+        emb_path = self._dir / EMBEDDINGS_FILENAME
+        ids_path = self._dir / PRODUCT_IDS_FILENAME
+        if not emb_path.exists() or not ids_path.exists():
+            return None
+        try:
+            embeddings = np.load(emb_path)
+            with open(ids_path) as f:
+                cached_ids = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if cached_ids != product_ids or len(embeddings) != len(product_ids):
+            return None
+        return embeddings
+
+    def save(self, product_ids: list[str], embeddings: np.ndarray) -> None:
+        """Write manifest, embeddings, and product_ids to disk."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        try:
+            mtime = self.corpus_path.stat().st_mtime
+        except OSError:
+            mtime = 0
+        manifest = {
+            "corpus_path": str(self.corpus_path),
+            "model_dir": str(self.model_dir),
+            "corpus_mtime": mtime,
+            "n_products": len(product_ids),
+        }
+        with open(self._dir / MANIFEST_FILENAME, "w") as f:
+            json.dump(manifest, f, indent=2)
+        np.save(self._dir / EMBEDDINGS_FILENAME, embeddings.astype(np.float32))
+        with open(self._dir / PRODUCT_IDS_FILENAME, "w") as f:
+            json.dump(product_ids, f)
+        logger.info("Saved embedding index to %s (%d products)", self._dir, len(product_ids))
 
 
 class Recommender:
     """
     Two-tower recommender: encodes user context and products, returns top-k by cosine similarity.
-
-    Product embeddings are cached on disk (by corpus + model) so they are not recomputed every startup.
+    Product embeddings are cached on disk via EmbeddingIndex.
     """
 
     def __init__(
@@ -228,49 +142,65 @@ class Recommender:
         batch_size: int = 64,
         use_index: bool = True,
     ):
-        self.model_dir = Path(model_dir)
-        self.corpus_path = Path(corpus_path)
-        self.product_ids, self.product_texts = load_corpus(self.corpus_path)
+        self.model_dir = self._resolve_model_dir(model_dir)
+        self.corpus_path = Path(corpus_path).resolve()
+        self.product_ids, self.product_texts = self._load_corpus()
         self.pid_to_text = dict(zip(self.product_ids, self.product_texts))
+        self.model = self._load_model()
+        self.product_embeddings = self._load_or_build_embeddings(batch_size, use_index)
 
-        device = get_inference_device()
+    def _resolve_model_dir(self, model_dir: Path | str) -> Path | str:
+        """Resolve to absolute Path if local dir exists; else return as-is (Hugging Face ID)."""
+        p = Path(model_dir)
+        return p.resolve() if p.exists() else model_dir
+
+    def _load_corpus(self) -> tuple[list[str], list[str]]:
+        """Load eval_corpus.json; return (product_ids, product_texts) preserving key order."""
+        with open(self.corpus_path) as f:
+            corpus = json.load(f)
+        ids = list(corpus.keys())
+        texts = [corpus[pid] for pid in ids]
+        return ids, texts
+
+    def _load_model(self) -> SentenceTransformer:
+        """Load SentenceTransformer from model_dir (local or Hugging Face)."""
+        device = self._inference_device()
         logger.info("Using inference device: %s", device)
-        self.model = SentenceTransformer(str(self.model_dir), device=device)
-        index_dir = embedding_index_dir(self.corpus_path, self.model_dir)
-        cached = load_embedding_index(index_dir, self.corpus_path, self.model_dir) if use_index else None
-        if cached is not None:
-            embeddings, ids = cached
-            if ids == self.product_ids:
-                self.product_embeddings = embeddings
+        return SentenceTransformer(str(self.model_dir), device=device)
+
+    def _inference_device(self) -> str:
+        """Return cuda, mps, or cpu based on INFERENCE_DEVICE env or auto-detect."""
+        override = os.getenv("INFERENCE_DEVICE")
+        if override:
+            return override
+        if torch.cuda.is_available():
+            return "cuda"
+        if getattr(torch.backends.mps, "is_available", lambda: False)():
+            return "mps"
+        return "cpu"
+
+    def _load_or_build_embeddings(self, batch_size: int, use_index: bool) -> np.ndarray:
+        """Load from EmbeddingIndex cache if valid; else encode corpus and save to cache."""
+        index = EmbeddingIndex(self.corpus_path, self.model_dir)
+        if use_index:
+            cached = index.load(self.product_ids)
+            if cached is not None:
                 logger.info(
-                    "Loaded model from %s, corpus %d products from %s (product embeddings from index)",
-                    model_dir,
-                    len(self.product_ids),
-                    corpus_path,
-                )
-            else:
-                cached = None
-        if cached is None:
-            self.product_embeddings = self.model.encode(
-                self.product_texts,
-                batch_size=batch_size,
-                show_progress_bar=True,
-                normalize_embeddings=True,
-            )
-            if use_index:
-                save_embedding_index(
-                    index_dir,
-                    self.corpus_path,
+                    "Loaded model from %s, corpus %d products (embeddings from index)",
                     self.model_dir,
-                    self.product_ids,
-                    self.product_embeddings,
+                    len(self.product_ids),
                 )
-            logger.info(
-                "Loaded model from %s, corpus %d products from %s",
-                model_dir,
-                len(self.product_ids),
-                corpus_path,
-            )
+                return cached
+        embeddings = self.model.encode(
+            self.product_texts,
+            batch_size=batch_size,
+            show_progress_bar=True,
+            normalize_embeddings=True,
+        )
+        if use_index:
+            index.save(self.product_ids, embeddings)
+        logger.info("Loaded model from %s, corpus %d products", self.model_dir, len(self.product_ids))
+        return embeddings
 
     def recommend(
         self,
@@ -278,26 +208,12 @@ class Recommender:
         top_k: int = 10,
         exclude_product_ids: set[str] | None = None,
     ) -> list[tuple[str, float]]:
-        """
-        Return top-k product recommendations for the given user context.
-
-        Args:
-            query: User context string (same format as anchor in training).
-            top_k: Number of recommendations to return.
-            exclude_product_ids: Optional set of product IDs to exclude (e.g. already in cart).
-
-        Returns:
-            List of (product_id, score) sorted by score descending. Score is cosine similarity.
-        """
-        query_emb = self.model.encode(
-            [query],
-            normalize_embeddings=True,
-        )[0]
+        """Return top-k (product_id, score) sorted by cosine similarity."""
+        query_emb = self.model.encode([query], normalize_embeddings=True)[0]
         scores = cos_sim(query_emb, self.product_embeddings)[0]
         indices = scores.argsort(descending=True)
-
-        results: list[tuple[str, float]] = []
         excluded = exclude_product_ids or set()
+        results: list[tuple[str, float]] = []
         for idx in indices:
             pid = self.product_ids[idx]
             if pid in excluded:
@@ -309,7 +225,7 @@ class Recommender:
 
 
 class MonitoredRecommender(Recommender):
-    """Recommender with built-in timing and metrics logging. Sets last_metrics after each recommend()."""
+    """Recommender with timing and metrics. Sets last_metrics after each recommend()."""
 
     def __init__(self, *args, metrics_logger: Optional[logging.Logger] = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -323,34 +239,19 @@ class MonitoredRecommender(Recommender):
         user_id: Optional[str] = None,
         exclude_product_ids: set[str] | None = None,
     ) -> list[tuple[str, float]]:
-        """
-        Recommend with instrumentation; sets self.last_metrics for API stats.
-
-        Args:
-            query: User context string.
-            top_k: Number of recommendations to return.
-            user_id: Optional user ID for logging.
-            exclude_product_ids: Optional set of product IDs to exclude.
-
-        Returns:
-            List of (product_id, score) sorted by score descending.
-        """
-        start_time = time.time()
-
+        """Recommend with instrumentation; sets self.last_metrics."""
+        start = time.time()
         encode_start = time.time()
-        query_emb = self.model.encode(
-            [query],
-            normalize_embeddings=True,
-        )[0]
-        encode_time_ms = (time.time() - encode_start) * 1000
+        query_emb = self.model.encode([query], normalize_embeddings=True)[0]
+        encode_ms = (time.time() - encode_start) * 1000
 
         sim_start = time.time()
         scores = cos_sim(query_emb, self.product_embeddings)[0]
         indices = scores.argsort(descending=True)
-        sim_time_ms = (time.time() - sim_start) * 1000
+        sim_ms = (time.time() - sim_start) * 1000
 
-        results: list[tuple[str, float]] = []
         excluded = exclude_product_ids or set()
+        results: list[tuple[str, float]] = []
         for idx in indices:
             pid = self.product_ids[idx]
             if pid in excluded:
@@ -359,226 +260,111 @@ class MonitoredRecommender(Recommender):
             if len(results) >= top_k:
                 break
 
-        total_time_ms = (time.time() - start_time) * 1000
+        total_ms = (time.time() - start) * 1000
         top_score = results[0][1] if results else 0.0
         avg_score = sum(s for _, s in results) / len(results) if results else 0.0
 
         self.last_metrics = RecommendationMetrics(
             user_id=user_id or "anonymous",
-            query_embedding_time_ms=encode_time_ms,
-            similarity_compute_time_ms=sim_time_ms,
-            total_latency_ms=total_time_ms,
+            query_embedding_time_ms=encode_ms,
+            similarity_compute_time_ms=sim_ms,
+            total_latency_ms=total_ms,
             num_recommendations=len(results),
             top_score=top_score,
             avg_score=avg_score,
             timestamp=time.time(),
         )
-        self.log_metrics(self.last_metrics)
-
+        self._log_metrics(self.last_metrics)
         return results
 
-    def log_metrics(self, metrics: RecommendationMetrics) -> None:
-        """
-        Log metrics in structured format for aggregation (ELK, Datadog, CloudWatch).
-
-        Args:
-            metrics: RecommendationMetrics from the last recommend() call.
-        """
+    def _log_metrics(self, m: RecommendationMetrics) -> None:
         self.metrics_logger.info(
             "recommendation_served",
             extra={
-                "user_id": metrics.user_id,
-                "latency_ms": metrics.total_latency_ms,
-                "encode_time_ms": metrics.query_embedding_time_ms,
-                "similarity_time_ms": metrics.similarity_compute_time_ms,
-                "num_results": metrics.num_recommendations,
-                "top_score": metrics.top_score,
-                "avg_score": metrics.avg_score,
+                "user_id": m.user_id,
+                "latency_ms": m.total_latency_ms,
+                "encode_time_ms": m.query_embedding_time_ms,
+                "similarity_time_ms": m.similarity_compute_time_ms,
+                "num_results": m.num_recommendations,
+                "top_score": m.top_score,
+                "avg_score": m.avg_score,
             },
         )
 
 
-recommender_cache: dict[tuple[Path | str, Path, bool], Recommender] = {}
-monitored_recommender_cache: dict[tuple[Path | str, Path, bool], MonitoredRecommender] = {}
+class InferenceConfig:
+    """Loads inference config from YAML. Attributes: model_dir, corpus, use_index, query, eval_query_id, top_k."""
 
+    def __init__(self, raw: dict):
+        """Parse raw YAML dict into typed config attributes."""
+        self.model_dir = self._resolve_model_dir(raw.get("model_dir", str(DEFAULT_MODEL_DIR)))
+        self.corpus = self._resolve_path(raw.get("corpus"), DEFAULT_CORPUS_PATH)
+        self.use_index = bool(raw.get("use_index", True))
+        self.query = raw.get("query")
+        self.eval_query_id = raw.get("eval_query_id")
+        self.top_k = int(raw.get("top_k", 10))
 
-def load_recommender(
-    model_dir: Path = DEFAULT_MODEL_DIR,
-    corpus_path: Path = DEFAULT_CORPUS_PATH,
-    batch_size: int = 64,
-    use_index: bool = True,
-) -> Recommender:
-    """
-    Load model and corpus, return a Recommender instance (for repeated recommend() calls).
-
-    If the same (model_dir, corpus_path, use_index) was already loaded this session,
-    returns that cached instance (no reload).
-
-    Args:
-        model_dir: Local path to trained model or Hugging Face model ID (e.g. username/repo-name).
-        corpus_path: Path to eval_corpus.json.
-        batch_size: Batch size for encoding products.
-        use_index: Whether to load/save product embedding cache.
-
-    Returns:
-        Recommender instance.
-    """
-    model_dir = normalize_model_dir(model_dir)
-    corpus_path = Path(corpus_path).resolve()
-    key = (model_dir, corpus_path, use_index)
-    if key in recommender_cache:
-        logger.info(
-            "Reusing recommender from session cache (model %s, corpus %s)",
-            model_dir,
-            corpus_path.name,
-        )
-        return recommender_cache[key]
-    rec = Recommender(
-        model_dir=model_dir,
-        corpus_path=corpus_path,
-        batch_size=batch_size,
-        use_index=use_index,
-    )
-    recommender_cache[key] = rec
-    return rec
-
-
-def load_monitored_recommender(
-    model_dir: Path = DEFAULT_MODEL_DIR,
-    corpus_path: Path = DEFAULT_CORPUS_PATH,
-    batch_size: int = 64,
-    use_index: bool = True,
-    metrics_logger: Optional[logging.Logger] = None,
-) -> MonitoredRecommender:
-    """
-    Load model and corpus, return a MonitoredRecommender (timing + metrics logging).
-
-    Same caching behavior as load_recommender; model_dir can be local path or Hugging Face model ID.
-
-    Args:
-        model_dir: Local path to trained model or Hugging Face model ID.
-        corpus_path: Path to eval_corpus.json.
-        batch_size: Batch size for encoding products.
-        use_index: Whether to load/save product embedding cache.
-        metrics_logger: Optional logger for recommendation_served events.
-
-    Returns:
-        MonitoredRecommender instance.
-    """
-    model_dir = normalize_model_dir(model_dir)
-    corpus_path = Path(corpus_path).resolve()
-    key = (model_dir, corpus_path, use_index)
-    if key in monitored_recommender_cache:
-        logger.info(
-            "Reusing monitored recommender from session cache (model %s, corpus %s)",
-            model_dir,
-            corpus_path.name,
-        )
-        return monitored_recommender_cache[key]
-    rec = MonitoredRecommender(
-        model_dir=model_dir,
-        corpus_path=corpus_path,
-        batch_size=batch_size,
-        use_index=use_index,
-        metrics_logger=metrics_logger,
-    )
-    monitored_recommender_cache[key] = rec
-    return rec
-
-
-def recommend(
-    query: str,
-    top_k: int = 10,
-    model_dir: Path = DEFAULT_MODEL_DIR,
-    corpus_path: Path = DEFAULT_CORPUS_PATH,
-) -> list[tuple[str, float]]:
-    """
-    One-shot: load recommender and return top-k for the query.
-
-    For repeated calls, use load_recommender() once and call .recommend() on it.
-
-    Args:
-        query: User context string.
-        top_k: Number of recommendations to return.
-        model_dir: Local path or Hugging Face model ID.
-        corpus_path: Path to eval_corpus.json.
-
-    Returns:
-        List of (product_id, score) sorted by score descending.
-    """
-    rec = load_recommender(model_dir=model_dir, corpus_path=corpus_path)
-    return rec.recommend(query=query, top_k=top_k)
-
-
-def load_config(config_path: Path | None = None) -> dict:
-    """Load inference config from YAML."""
-    path = Path(config_path) if config_path else DEFAULT_CONFIG_INFERENCE
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    with open(path) as f:
-        raw = yaml.safe_load(f) or {}
-
-    def resolve(p: str | None) -> Path:
-        if not p:
-            return DEFAULT_CORPUS_PATH
-        return PROJECT_ROOT / p if not Path(p).is_absolute() else Path(p)
-
-    model_dir = raw.get("model_dir", str(DEFAULT_MODEL_DIR))
-    if model_dir:
-        p = Path(str(model_dir))
+    def _resolve_model_dir(self, model_dir: str) -> Path | str:
+        p = Path(model_dir)
         if not p.is_absolute():
             local = PROJECT_ROOT / model_dir
-            model_dir = local if local.exists() else model_dir
-        else:
-            model_dir = p
+            return local if local.exists() else model_dir
+        return p
 
-    return {
-        "model_dir": model_dir,
-        "corpus": resolve(raw.get("corpus")),
-        "use_index": bool(raw.get("use_index", True)),
-        "query": raw.get("query"),
-        "eval_query_id": raw.get("eval_query_id"),
-        "top_k": int(raw.get("top_k", 10)),
-    }
+    def _resolve_path(self, p: str | None, default: Path) -> Path:
+        """Resolve path string to Path; relative paths are under PROJECT_ROOT."""
+        if not p:
+            return default
+        path = Path(p)
+        return PROJECT_ROOT / p if not path.is_absolute() else path
+
+    @classmethod
+    def load(cls, config_path: Path | None = None) -> InferenceConfig:
+        path = Path(config_path) if config_path else DEFAULT_CONFIG_INFERENCE
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
+        return cls(raw)
 
 
 def main() -> None:
+    """CLI entrypoint: load config, create Recommender, run demo query and print top-k."""
     parser = argparse.ArgumentParser(description="Serve product recommendations")
-    parser.add_argument("--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_INFERENCE.relative_to(PROJECT_ROOT)})")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=f"Path to YAML config (default: {DEFAULT_CONFIG_INFERENCE.relative_to(PROJECT_ROOT)})",
+    )
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
-
+    cfg = InferenceConfig.load(args.config)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    model_dir = cfg["model_dir"] if isinstance(cfg["model_dir"], Path) else Path(str(cfg["model_dir"]))
-    rec = load_recommender(
-        model_dir=model_dir,
-        corpus_path=cfg["corpus"],
-        use_index=cfg["use_index"],
-    )
+    model_dir = cfg.model_dir if isinstance(cfg.model_dir, Path) else Path(str(cfg.model_dir))
+    rec = Recommender(model_dir=model_dir, corpus_path=cfg.corpus, use_index=cfg.use_index)
 
-    if cfg["eval_query_id"]:
-        queries_path = cfg["corpus"].parent / EVAL_QUERIES_FILENAME
-        with open(queries_path, "r") as f:
+    if cfg.eval_query_id:
+        queries_path = cfg.corpus.parent / EVAL_QUERIES_FILENAME
+        with open(queries_path) as f:
             eval_queries = json.load(f)
-        if cfg["eval_query_id"] not in eval_queries:
-            raise KeyError(f"eval_query_id {cfg['eval_query_id']} not in {queries_path}")
-        query = eval_queries[cfg["eval_query_id"]]
-        print(f"Query (eval_id={cfg['eval_query_id']}):\n  {query[:200]}...\n")
-    elif cfg["query"]:
-        query = cfg["query"]
+        if cfg.eval_query_id not in eval_queries:
+            raise KeyError(f"eval_query_id {cfg.eval_query_id} not in {queries_path}")
+        query = eval_queries[cfg.eval_query_id]
+        print(f"Query (eval_id={cfg.eval_query_id}):\n  {query[:200]}...\n")
+    elif cfg.query:
+        query = cfg.query
         print(f"Query:\n  {query}\n")
     else:
         query = "[+7d w4h14] Organic Milk, Whole Wheat Bread."
-        print("No query or eval_query_id in config. Using demo query (past orders only):\n")
+        print("No query or eval_query_id in config. Using demo query:\n")
         print(f"  {query}\n")
 
-    results = rec.recommend(query=query, top_k=cfg["top_k"])
-    print(f"Top-{cfg['top_k']} recommendations:")
+    results = rec.recommend(query=query, top_k=cfg.top_k)
+    print(f"Top-{cfg.top_k} recommendations:")
     for i, (pid, score) in enumerate(results, 1):
-        text = rec.pid_to_text[pid]
-        print(f"  {i}. product_id={pid} (score={score:.4f}) {text}")
+        print(f"  {i}. product_id={pid} (score={score:.4f}) {rec.pid_to_text[pid]}")
 
 
 if __name__ == "__main__":

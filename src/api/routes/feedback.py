@@ -41,7 +41,7 @@ async def feedback_endpoint(
         _: Injected API key verification.
 
     Returns:
-        Dict with "status": "accepted" and "events_ingested": count.
+        Dict with "status": "accepted" and "count": number of events ingested.
     """
     events: List[FeedbackEvent]
     if isinstance(payload, FeedbackBatchRequest):

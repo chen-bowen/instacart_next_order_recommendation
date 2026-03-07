@@ -29,11 +29,8 @@ from src.api.schemas import (
     RecommendationResponse,
     InferenceStatistics,
 )
-from src.inference.serve_recommendations import (
-    MonitoredRecommender,
-    Recommender,
-    load_monitored_recommender,
-)
+from src.constants import DEFAULT_CORPUS_PATH, DEFAULT_MODEL_DIR
+from src.inference.serve_recommendations import MonitoredRecommender, Recommender
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +76,7 @@ def get_recommender(request: Request) -> Recommender:
     if rec is None:
         # As a fallback, try to load using default constants; readiness endpoint should catch this earlier.
         logger.warning("Recommender not preloaded; loading on-demand")
-        rec = load_monitored_recommender()
+        rec = MonitoredRecommender(model_dir=DEFAULT_MODEL_DIR, corpus_path=DEFAULT_CORPUS_PATH)
         request.app.state.recommender = rec
     return rec
 

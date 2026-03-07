@@ -1,3 +1,9 @@
+"""
+SQLite storage for feedback events (impression, click, add_to_cart, purchase).
+
+Used by POST /feedback to persist events for analytics and model tuning.
+"""
+
 from __future__ import annotations
 
 import json
@@ -83,6 +89,8 @@ def init_db() -> Path:
 
 @dataclass
 class FeedbackEventRecord:
+    """Internal representation of a feedback event for SQLite insertion."""
+
     request_id: Optional[str]
     event_type: str
     product_id: str
@@ -93,6 +101,7 @@ class FeedbackEventRecord:
 
 
 def _serialize_metadata(metadata: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Serialize metadata dict to JSON string for SQLite storage. Returns None if metadata is None."""
     if metadata is None:
         return None
     try:

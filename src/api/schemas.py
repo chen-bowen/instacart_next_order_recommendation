@@ -1,3 +1,9 @@
+"""
+Pydantic schemas for the Instacart recommendation API.
+
+Request/response models for /recommend and /feedback endpoints.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -7,6 +13,8 @@ from pydantic import BaseModel, Field
 
 
 class RecommendationRequest(BaseModel):
+    """Request body for POST /recommend. Provide user_context or user_id, plus top_k."""
+
     user_context: Optional[str] = Field(
         default=None,
         max_length=10_000,
@@ -24,6 +32,8 @@ class RecommendationRequest(BaseModel):
 
 
 class RecommendationItem(BaseModel):
+    """Single recommended product with ID, similarity score, and optional display text."""
+
     product_id: str
     score: float
     product_text: Optional[str] = None
@@ -42,6 +52,8 @@ class InferenceStatistics(BaseModel):
 
 
 class RecommendationResponse(BaseModel):
+    """Response from POST /recommend. Includes request_id for feedback correlation."""
+
     request_id: str
     recommendations: List[RecommendationItem]
     stats: Optional[InferenceStatistics] = None
@@ -51,6 +63,8 @@ EventType = Literal["impression", "click", "add_to_cart", "purchase"]
 
 
 class FeedbackEvent(BaseModel):
+    """Single feedback event (impression, click, add_to_cart, purchase) for POST /feedback."""
+
     request_id: str
     event_type: EventType
     product_id: str
@@ -61,8 +75,12 @@ class FeedbackEvent(BaseModel):
 
 
 class FeedbackBatchRequest(BaseModel):
+    """Batch of feedback events for POST /feedback."""
+
     events: List[FeedbackEvent]
 
 
 class HealthResponse(BaseModel):
+    """Response for /health and /ready probes."""
+
     status: str = "ok"

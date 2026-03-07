@@ -23,7 +23,7 @@ load_dotenv(DEFAULT_DOTENV_PATH)
 
 
 def load_config(config_path: Path | None = None) -> dict:
-    """Load upload config from YAML."""
+    """Load upload config from YAML. Returns repo_id, model_dir, private."""
     path = Path(config_path) if config_path else DEFAULT_CONFIG_UPLOAD_MODEL
     if not path.is_absolute():
         path = PROJECT_ROOT / path
@@ -40,22 +40,24 @@ def load_config(config_path: Path | None = None) -> dict:
 
 
 def main() -> None:
+    """CLI entrypoint: load config, create HF repo if needed, upload model folder."""
     parser = argparse.ArgumentParser(description="Upload the trained two-tower SBERT model to the Hugging Face Hub.")
-    parser.add_argument("--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_UPLOAD_MODEL.relative_to(PROJECT_ROOT)})")
+    parser.add_argument(
+        "--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_UPLOAD_MODEL.relative_to(PROJECT_ROOT)})"
+    )
     parser.add_argument("--repo-id", type=str, default=None, help="Override repo_id from config")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     repo_id = args.repo_id or cfg["repo_id"]
     if not repo_id:
-        raise SystemExit(f"repo_id is required. Set it in {DEFAULT_CONFIG_UPLOAD_MODEL.relative_to(PROJECT_ROOT)} or pass --repo-id YOUR_USERNAME/instacart-two-tower-sbert")
+        raise SystemExit(
+            f"repo_id is required. Set it in {DEFAULT_CONFIG_UPLOAD_MODEL.relative_to(PROJECT_ROOT)} or pass --repo-id YOUR_USERNAME/instacart-two-tower-sbert"
+        )
 
     model_dir = Path(cfg["model_dir"]).resolve()
     if not model_dir.is_dir():
-        raise SystemExit(
-            f"Model directory not found: {model_dir}. Train first with:\n"
-            "  uv run python -m src.train"
-        )
+        raise SystemExit(f"Model directory not found: {model_dir}. Train first with:\n" "  uv run python -m src.training")
 
     api = HfApi()
     api.create_repo(repo_id=repo_id, private=cfg["private"], exist_ok=True)

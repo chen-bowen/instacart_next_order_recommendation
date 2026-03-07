@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 def print_metrics(name: str, metrics: dict[str, float]) -> None:
+    """Print IR metrics (Accuracy@k, Recall@10, MRR@10, NDCG@10, MAP@100) for a baseline."""
     print(f"\n--- {name} ---")
     print(f"  Accuracy@1:   {metrics['accuracy_at_1']:.4f}")
     print(f"  Accuracy@3:   {metrics['accuracy_at_3']:.4f}")
@@ -57,6 +58,7 @@ def load_config(config_path: Path | None = None) -> dict:
 
 
 def main() -> None:
+    """CLI entrypoint: load config, run content-based and/or CF baselines, print metrics."""
     parser = argparse.ArgumentParser(description="Run content-based and CF baselines")
     parser.add_argument("--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_BASELINES.relative_to(PROJECT_ROOT)})")
     args = parser.parse_args()

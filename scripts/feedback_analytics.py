@@ -151,7 +151,7 @@ def compute_aggregate_metrics(events: list[tuple]) -> dict[str, float]:
 
 
 def load_config(config_path: Path | None = None) -> dict:
-    """Load feedback analytics config from YAML."""
+    """Load feedback analytics config from YAML. Returns db_path, since, show_funnel_sample."""
     path = Path(config_path) if config_path else DEFAULT_CONFIG_FEEDBACK_ANALYTICS
     if not path.is_absolute():
         path = PROJECT_ROOT / path
@@ -165,6 +165,7 @@ def load_config(config_path: Path | None = None) -> dict:
 
 
 def main() -> None:
+    """CLI entrypoint: load config, load events from DB, compute and print aggregate metrics and funnel sample."""
     parser = argparse.ArgumentParser(
         description="Compute feedback analytics: CTR, add-to-cart rate, purchase rate, per-request funnel"
     )

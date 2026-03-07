@@ -1,6 +1,8 @@
 """
 Data preparation for Instacart two-tower SBERT training.
 
+Class-based: use InstacartDataLoader directly. No wrapper functions.
+
 Builds (anchor, positive) pairs:
 - anchor: user context text (prior order history + optional order pattern)
 - positive: product text (name, aisle, department)
@@ -16,8 +18,8 @@ import logging
 from collections import defaultdict
 from pathlib import Path
 
-import yaml
 import pandas as pd
+import yaml
 from datasets import Dataset
 
 from src.constants import (
@@ -28,9 +30,9 @@ from src.constants import (
     DEFAULT_PROCESSED_DIR,
     DEPARTMENTS_CSV,
     EVAL_CORPUS_FILENAME,
+    EVAL_DATASET_SUBDIR,
     EVAL_QUERIES_FILENAME,
     EVAL_RELEVANT_DOCS_FILENAME,
-    EVAL_DATASET_SUBDIR,
     EVAL_SET_PRIOR,
     EVAL_SET_TRAIN,
     ORDER_PRODUCTS_CHUNK_SIZE,
@@ -46,604 +48,353 @@ from src.utils import setup_colored_logging
 logger = logging.getLogger(__name__)
 
 
-def load_product_text_map(
-    products_path: Path, aisles_path: Path, departments_path: Path
-) -> dict[int, str]:
-    """
-    Build a mapping from product_id to a single text string for the item tower.
-
-    Joins products with aisle and department names, then formats each product as
-    "Product: {name}. Aisle: {aisle}. Department: {department}." for use as
-    the "positive" (item) side of (anchor, positive) pairs.
-
-    Args:
-        products_path: Path to products.csv (product_id, product_name, aisle_id, department_id).
-        aisles_path: Path to aisles.csv (aisle_id, aisle).
-        departments_path: Path to departments.csv (department_id, department).
-
-    Returns:
-        Dict mapping product_id (int) to the formatted product text (str).
-    """
-    # Load the three CSV tables into DataFrames.
-    products = pd.read_csv(products_path)
-    aisles = pd.read_csv(aisles_path)
-    departments = pd.read_csv(departments_path)
-
-    # Join products with aisle and department so each row has name, aisle name, department name.
-    products = products.merge(aisles, on="aisle_id").merge(
-        departments, on="department_id"
-    )
-    # Build one string per product: "Product: X. Aisle: Y. Department: Z."
-    products["text"] = (
-        "Product: "
-        + products["product_name"].astype(str)
-        + ". Aisle: "
-        + products["aisle"].astype(str)
-        + ". Department: "
-        + products["department"].astype(str)
-        + "."
-    )
-    # Return as dict: product_id -> text.
-    return dict(zip(products["product_id"], products["text"]))
-
-
-def load_orders(orders_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Load orders.csv and split into train vs prior by eval_set.
-
-    Target orders are the "next" order we predict for each user; history orders
-    are that user's history used only to build context (no leakage).
-
-    Args:
-        orders_path: Path to orders.csv (order_id, user_id, eval_set, order_number, etc.).
-
-    Returns:
-        Tuple of (target_orders, history_orders), each a DataFrame with relevant columns.
-    """
-    # Load all orders.
-    orders = pd.read_csv(orders_path)
-    # Normalize hour column to 2-digit string if it was read as object (e.g. "08").
-    if orders["order_hour_of_day"].dtype == object:
-        orders["order_hour_of_day"] = (
-            orders["order_hour_of_day"].astype(str).str.zfill(2)
-        )
-    # Rows where we have a "next order" to predict; keep columns needed for context and split.
-    target_orders = orders[orders["eval_set"] == EVAL_SET_TRAIN][
-        [
-            "order_id",
-            "user_id",
-            "order_number",
-            "order_dow",
-            "order_hour_of_day",
-            "days_since_prior_order",
-        ]
-    ].copy()
-    # Rows that are historical orders (used only to build user context).
-    # Keep dow / hour / days_since_prior_order so temporal patterns between orders are available.
-    history_orders = orders[orders["eval_set"] == EVAL_SET_PRIOR][
-        [
-            "order_id",
-            "user_id",
-            "order_number",
-            "order_dow",
-            "order_hour_of_day",
-            "days_since_prior_order",
-        ]
-    ].copy()
-    return target_orders, history_orders
-
-
-def build_order_to_products(
-    order_products_prior_path: Path,
-    history_order_ids: set[int],
-    chunk_size: int = ORDER_PRODUCTS_CHUNK_SIZE,
-) -> dict[int, list[int]]:
-    """
-    Build a mapping from each history order_id to the list of product_ids in that order.
-
-    Reads order_products__prior.csv in chunks to avoid loading ~32M rows at once.
-    Only rows whose order_id is in history_order_ids are kept (e.g. orders for users
-    we care about when using max_train_orders).
-
-    Args:
-        order_products_prior_path: Path to order_products__prior.csv.
-        history_order_ids: Set of order_ids to include (typically history orders for our users).
-        chunk_size: Number of rows per chunk when reading the CSV (default: ORDER_PRODUCTS_CHUNK_SIZE).
-
-    Returns:
-        Dict mapping order_id (int) to list of product_id (int) in that order.
-    """
-    # Defaultdict so we can append without checking if key exists.
-    order_to_products: dict[int, list[int]] = defaultdict(list)
-    # Stream the CSV in chunks to limit memory.
-    for chunk in pd.read_csv(order_products_prior_path, chunksize=chunk_size):
-        # Keep only rows for orders we care about.
-        chunk = chunk[chunk["order_id"].isin(history_order_ids)]
-        # Append each (order_id, product_id) to the list for that order.
-        for order_id, product_id in chunk[["order_id", "product_id"]].itertuples(
-            index=False
-        ):
-            order_to_products[order_id].append(product_id)
-    return dict(order_to_products)
-
-
-def build_user_context_for_target_orders(
-    target_orders: pd.DataFrame,
-    history_orders: pd.DataFrame,
-    order_to_products: dict[int, list[int]],
-    product_text_map: dict[int, str],
-    max_prior_orders: int = 5,
-    max_product_names: int = 20,
-) -> dict[int, str]:
-    """
-    For each target order, build one user-context string using only that user's order history.
-
-    Context format (compact): "[w{dow}h{hour}] name1, name2; [+{days}d w{dow}h{hour}] ... Next: +{gap}d w{dow}h{hour}"
-    Used as the "anchor" (query) side in (anchor, positive) pairs. No leakage: only
-    history orders with order_number < this target order are used.
-
-    Args:
-        target_orders: DataFrame of orders we predict (order_id, user_id, order_number, order_dow, etc.).
-        history_orders: DataFrame of past orders used only for context (order_id, user_id, order_number).
-        order_to_products: Mapping from order_id to list of product_ids (for history orders).
-        product_text_map: Mapping from product_id to full product text (used to get name only).
-        max_prior_orders: Max number of history orders per user to consider.
-        max_product_names: Max number of product names to include in the context string.
-
-    Returns:
-        Dict mapping target order_id (int) to the user context string (str).
-    """
-    # Sort so we can take "last N" history orders per user by order_number.
-    history_orders = history_orders.sort_values(["user_id", "order_number"])
-    order_id_to_context: dict[int, str] = {}
-
-    for _, row in target_orders.iterrows():
-        # Ensure order_id is always treated as an integer (avoids float keys like 3178496.0)
-        order_id = int(row["order_id"])
-        # Get the history orders for the user that happened before the target order.
-        user_history = history_orders[
-            (history_orders["user_id"] == row["user_id"])
-            & (history_orders["order_number"] < row["order_number"])
-        ].tail(max_prior_orders)
-
-        segments: list[str] = []
-        total_products = 0
-
-        # Walk each prior order in chronological order and encode its time features + products.
-        for _, h in user_history.iterrows():
-            if total_products >= max_product_names:
-                break
-            oid = int(h["order_id"])
-            order_products = []
-            for pid in order_to_products.get(oid, []):
-                if pid not in product_text_map:
-                    continue
-                if total_products >= max_product_names:
-                    break
-                name = product_text_map[pid].split("Product: ")[1].split(".")[0].strip()
-                order_products.append(name)
-                total_products += 1
-
-            if not order_products:
-                continue
-
-            dow = int(h["order_dow"])
-            hour = (
-                h["order_hour_of_day"]
-                if isinstance(h["order_hour_of_day"], str)
-                else str(int(h["order_hour_of_day"]))
-            )
-            # Compact time prefix: w=weekday 0-6, h=hour; +Nd = N days after previous
-            if pd.isna(h["days_since_prior_order"]):
-                time_prefix = f"w{dow}h{hour}"
-            else:
-                days_gap = int(h["days_since_prior_order"])
-                time_prefix = f"+{days_gap}d w{dow}h{hour}"
-
-            seg = f"[{time_prefix}] " + ", ".join(order_products)
-            segments.append(seg)
-
-        products_str = "; ".join(segments) if segments else "(no prior orders)"
-        row_dow = int(row["order_dow"])
-        row_hour = (
-            row["order_hour_of_day"]
-            if isinstance(row["order_hour_of_day"], str)
-            else str(int(row["order_hour_of_day"]))
-        )
-        if pd.isna(row["days_since_prior_order"]):
-            next_clause = f"Next: w{row_dow}h{row_hour}"
-        else:
-            gap = int(row["days_since_prior_order"])
-            next_clause = f"Next: +{gap}d w{row_dow}h{row_hour}"
-        context = f"{products_str}. {next_clause}"
-        order_id_to_context[order_id] = context
-
-    return order_id_to_context
-
-
-def strip_next_order_from_context(context: str) -> str:
-    """
-    Remove the ' Next: ...' clause from a user context string.
-
-    Use for eval/serve when we don't know the next order time (only past orders are known).
-
-    Args:
-        context: User context string that may end with " Next: ...".
-
-    Returns:
-        Context with the Next clause stripped.
-    """
+def _strip_next_order_from_context(context: str) -> str:
+    """Remove the ' Next: ...' clause from a user context string."""
     if " Next:" in context:
         return context.split(" Next:")[0].strip()
     return context
 
 
-def build_anchor_positive_pairs(
-    order_products_train_path: Path,
-    order_id_to_context: dict[int, str],
-    product_text_map: dict[int, str],
-) -> tuple[list[str], list[str], list[int]]:
+class DataPrepConfig:
+    """Loads data prep config from YAML. Maps config keys to paths and numeric params."""
+
+    def __init__(self, raw: dict):
+        """Parse raw YAML dict into typed config attributes."""
+        data_dir = raw.get("data_dir", str(DEFAULT_DATA_DIR))
+        output_dir = raw.get("output_dir", str(DEFAULT_PROCESSED_DIR))
+        self.data_dir = PROJECT_ROOT / data_dir if not Path(data_dir).is_absolute() else Path(data_dir)
+        self.output_dir = PROJECT_ROOT / output_dir if not Path(output_dir).is_absolute() else Path(output_dir)
+        self.max_prior_orders = int(raw.get("max_prior_orders", 5))
+        self.max_product_names = int(raw.get("max_product_names", 20))
+        self.sample_frac = float(raw["sample_frac"]) if raw.get("sample_frac") is not None else None
+        self.eval_frac = float(raw.get("eval_frac", 0.1))
+        self.eval_serve_time = bool(raw.get("eval_serve_time", True))
+        self.max_target_orders = int(raw["max_target_orders"]) if raw.get("max_target_orders") is not None else None
+        self.seed = int(raw.get("seed", 42))
+
+    @classmethod
+    def load(cls, config_path: Path | None = None) -> DataPrepConfig:
+        """Load config from YAML file. Uses default path if config_path is None."""
+        path = Path(config_path) if config_path else DEFAULT_CONFIG_DATA_PREP
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
+        return cls(raw)
+
+
+class InstacartDataLoader:
     """
-    Build (anchor, positive) training pairs from order_products__train. No need to have
-    Negative pairs as we are not using a contrastive loss.
-
-    Each row in the train order-products table gives one positive pair: the user
-    context for that order (anchor) and the product text (positive). Also returns
-    order_id per row so we can split train/eval by order without leakage.
-
-    Args:
-        order_products_train_path: Path to order_products__train.csv (order_id, product_id, ...).
-        order_id_to_context: Mapping from train order_id to user context string.
-        product_text_map: Mapping from product_id to product text.
-
-    Returns:
-        Tuple of (anchors, positives, order_ids): parallel lists of same length.
-    """
-    # Load the table of (order_id, product_id) for train orders.
-    train_op = pd.read_csv(order_products_train_path)
-    anchors: list[str] = []
-    positives: list[str] = []
-    order_ids: list[int] = []
-
-    for _, row in train_op.iterrows():
-        order_id = row["order_id"]
-        product_id = row["product_id"]
-        # Skip if we have no context for this order or no text for this product.
-        if order_id not in order_id_to_context or product_id not in product_text_map:
-            continue
-        # One positive pair: user context (anchor) and product text (positive).
-        anchors.append(order_id_to_context[order_id])
-        positives.append(product_text_map[product_id])
-        order_ids.append(order_id)
-
-    return anchors, positives, order_ids
-
-
-def _params_subdir(
-    max_prior_orders: int,
-    max_product_names: int,
-    eval_frac: float,
-    eval_serve_time: bool,
-    sample_frac: float | None,
-    max_target_orders: int | None,
-) -> str:
-    """
-    Build a short subdir name from data prep params so different settings get different folders.
-
-    Args:
-        max_prior_orders: Max prior orders per user.
-        max_product_names: Max product names in context.
-        eval_frac: Eval fraction.
-        eval_serve_time: Whether eval queries use serve-time format.
-        sample_frac: Optional train sample fraction.
-        max_target_orders: Optional max target orders.
-
-    Returns:
-        Subdir name (e.g. p5_mp20_ef0.1).
-    """
-    parts = [
-        f"p{max_prior_orders}",
-        f"mp{max_product_names}",
-        f"ef{eval_frac}",
-    ]
-    if not eval_serve_time:
-        parts.append("no_serve")
-    if sample_frac is not None:
-        parts.append(f"sf{sample_frac}")
-    if max_target_orders is not None:
-        parts.append(f"mt{max_target_orders}")
-    return "_".join(parts)
-
-
-def run(
-    data_dir: Path = DEFAULT_DATA_DIR,
-    output_dir: Path = DEFAULT_PROCESSED_DIR,
-    max_prior_orders: int = 5,
-    max_product_names: int = 20,
-    sample_frac: float | None = None,
-    eval_frac: float = 0.1,
-    eval_serve_time: bool = True,
-    max_target_orders: int | None = None,
-    seed: int = 42,
-) -> tuple[Dataset, Dataset | None, dict, dict, dict]:
-    """
-    Run the full data preparation pipeline and save outputs to disk.
+    Prepares Instacart data for two-tower SBERT training.
 
     Loads CSVs, builds (anchor, positive) pairs, splits by order into train/eval,
-    optionally samples the train set, and writes HuggingFace datasets plus
-    eval_queries, eval_corpus, and eval_relevant_docs for InformationRetrievalEvaluator.
-    When eval_serve_time=True (default), eval_queries have " Next: ..." stripped.
-
-    Args:
-        data_dir: Path to data/ folder (CSVs).
-        output_dir: Path to save processed outputs.
-        max_prior_orders: Max history orders per user for context.
-        max_product_names: Max product names per context string.
-        sample_frac: Optional fraction to sample from train pairs.
-        eval_frac: Fraction of orders for eval set.
-        eval_serve_time: If True, strip " Next: ..." from eval queries.
-        max_target_orders: Optional cap on target orders.
-        seed: Random seed for sampling.
-
-    Returns:
-        Tuple of (train_dataset, eval_dataset, eval_queries, eval_corpus, eval_relevant_docs).
+    and writes HuggingFace datasets plus eval_queries, eval_corpus, eval_relevant_docs.
     """
-    # Ensure paths are Path objects. Write to a param-based subdir so different settings don't overwrite.
-    data_dir = Path(data_dir)
-    output_dir = Path(output_dir)
-    subdir = _params_subdir(
-        max_prior_orders,
-        max_product_names,
-        eval_frac,
-        eval_serve_time,
-        sample_frac,
-        max_target_orders,
-    )
-    effective_output_dir = output_dir / subdir
-    effective_output_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("Output subdir (params): %s -> %s", subdir, effective_output_dir)
 
-    logger.info("[Step 1/7] Loading product text map...")
-    # Paths to all input CSVs.
-    products_path = data_dir / PRODUCTS_CSV
-    aisles_path = data_dir / AISLES_CSV
-    departments_path = data_dir / DEPARTMENTS_CSV
-    orders_path = data_dir / ORDERS_CSV
-    order_products_prior_path = data_dir / ORDER_PRODUCTS_PRIOR_CSV
-    order_products_train_path = data_dir / ORDER_PRODUCTS_TRAIN_CSV
+    def __init__(
+        self,
+        data_dir: Path = DEFAULT_DATA_DIR,
+        output_dir: Path = DEFAULT_PROCESSED_DIR,
+        max_prior_orders: int = 5,
+        max_product_names: int = 20,
+        sample_frac: float | None = None,
+        eval_frac: float = 0.1,
+        eval_serve_time: bool = True,
+        max_target_orders: int | None = None,
+        seed: int = 42,
+    ):
+        self.data_dir = Path(data_dir)
+        self.output_dir = Path(output_dir)
+        self.max_prior_orders = max_prior_orders
+        self.max_product_names = max_product_names
+        self.sample_frac = sample_frac
+        self.eval_frac = eval_frac
+        self.eval_serve_time = eval_serve_time
+        self.max_target_orders = max_target_orders
+        self.seed = seed
 
-    # Step 1: product_id -> product text (for item tower).
-    product_text_map = load_product_text_map(
-        products_path, aisles_path, departments_path
-    )
-    logger.info("  -> %d products", len(product_text_map))
+    def prepare(self) -> tuple[Dataset, Dataset | None, dict, dict, dict]:
+        """Run the full pipeline and save outputs. Returns (train_ds, eval_ds, eval_queries, eval_corpus, eval_relevant_docs)."""
+        effective_dir = self._effective_output_dir()
+        effective_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Output subdir: %s", effective_dir)
 
-    # Step 2: Load orders; optionally limit to first max_target_orders for fast runs.
-    logger.info("[Step 2/7] Loading orders...")
-    target_orders, history_orders = load_orders(orders_path)
-    if max_target_orders is not None:
-        target_orders = target_orders.head(max_target_orders)
-    # Restrict history orders to users we need (reduces memory when using max_target_orders).
-    users_needed = set(target_orders["user_id"].tolist())
-    history_orders = history_orders[history_orders["user_id"].isin(users_needed)]
-    history_order_ids = set(history_orders["order_id"].tolist())
-    logger.info(
-        "  -> target: %d orders, history: %d orders",
-        len(target_orders),
-        len(history_order_ids),
-    )
+        product_text_map = self._load_product_text_map()
+        logger.info("[Step 1/7] Loaded %d products", len(product_text_map))
 
-    # Step 3: For each history order, list of product_ids (chunked read).
-    logger.info("[Step 3/7] Building order -> products mapping (chunked read)...")
-    order_to_products = build_order_to_products(
-        order_products_prior_path, history_order_ids
-    )
-    logger.info("  -> %d orders with products", len(order_to_products))
+        target_orders, history_orders = self._load_orders()
+        if self.max_target_orders is not None:
+            target_orders = target_orders.head(self.max_target_orders)
+        users_needed = set(target_orders["user_id"].tolist())
+        history_orders = history_orders[history_orders["user_id"].isin(users_needed)]
+        history_order_ids = set(history_orders["order_id"].tolist())
+        logger.info("[Step 2/7] target: %d orders, history: %d orders", len(target_orders), len(history_order_ids))
 
-    # Step 4: For each target order, build user context string from history orders only.
-    logger.info("[Step 4/7] Building user context for target orders...")
-    order_id_to_context = build_user_context_for_target_orders(
-        target_orders,
-        history_orders,
-        order_to_products,
-        product_text_map,
-        max_prior_orders=max_prior_orders,
-        max_product_names=max_product_names,
-    )
-    logger.info("  -> %d order contexts", len(order_id_to_context))
+        order_to_products = self._build_order_to_products(history_order_ids)
+        logger.info("[Step 3/7] %d orders with products", len(order_to_products))
 
-    # Step 5: (anchor, positive) pairs and order_id per row for split.
-    logger.info("[Step 5/7] Building anchor-positive pairs...")
-    anchors, positives, order_ids = build_anchor_positive_pairs(
-        order_products_train_path,
-        order_id_to_context,
-        product_text_map,
-    )
-    logger.info("  -> %d pairs", len(anchors))
+        order_id_to_context = self._build_user_context(target_orders, history_orders, order_to_products, product_text_map)
+        logger.info("[Step 4/7] %d order contexts", len(order_id_to_context))
 
-    # Step 6: Split by order so all pairs from an order go to same split (no leakage).
-    logger.info("[Step 6/7] Splitting train/eval by order...")
-    train_order_ids_all = set(order_id_to_context.keys())
-    order_list = sorted(train_order_ids_all)
-    n_eval = max(1, int(len(order_list) * eval_frac))
-    eval_order_ids = set(order_list[-n_eval:])
+        anchors, positives, order_ids = self._build_anchor_positive_pairs(order_id_to_context, product_text_map)
+        logger.info("[Step 5/7] %d pairs", len(anchors))
 
-    train_anchors, train_positives = [], []
-    eval_anchors, eval_positives = [], []
-    for a, p, oid in zip(anchors, positives, order_ids):
-        if oid in eval_order_ids:
-            eval_anchors.append(a)
-            eval_positives.append(p)
+        train_anchors, train_positives, eval_anchors, eval_positives, eval_order_ids = self._split_train_eval(
+            anchors, positives, order_ids, order_id_to_context
+        )
+        if self.sample_frac is not None and self.sample_frac < 1.0:
+            train_df = pd.DataFrame({"anchor": train_anchors, "positive": train_positives})
+            train_df = train_df.sample(frac=self.sample_frac, random_state=self.seed)
+            train_anchors = train_df["anchor"].tolist()
+            train_positives = train_df["positive"].tolist()
+
+        train_dataset = Dataset.from_dict({"anchor": train_anchors, "positive": train_positives})
+        logger.info("[Step 6/7] train: %d pairs, eval: %d pairs", len(train_anchors), len(eval_anchors))
+
+        eval_queries, eval_corpus, eval_relevant_docs = self._build_eval_artifacts(
+            eval_order_ids, order_id_to_context, product_text_map
+        )
+        eval_dataset = (
+            Dataset.from_dict({"anchor": eval_anchors, "positive": eval_positives})
+            if eval_anchors and eval_positives
+            else None
+        )
+
+        self._save_outputs(effective_dir, train_dataset, eval_dataset, eval_queries, eval_corpus, eval_relevant_docs)
+        logger.info("[Step 7/7] Saved to %s", effective_dir)
+
+        return train_dataset, eval_dataset, eval_queries, eval_corpus, eval_relevant_docs
+
+    def _effective_output_dir(self) -> Path:
+        """Build param-based subdir name (e.g. p5_mp20_ef0.1) for output isolation."""
+        parts = [f"p{self.max_prior_orders}", f"mp{self.max_product_names}", f"ef{self.eval_frac}"]
+        if not self.eval_serve_time:
+            parts.append("no_serve")
+        if self.sample_frac is not None:
+            parts.append(f"sf{self.sample_frac}")
+        if self.max_target_orders is not None:
+            parts.append(f"mt{self.max_target_orders}")
+        return self.output_dir / "_".join(parts)
+
+    def _load_product_text_map(self) -> dict[int, str]:
+        """Load products, aisles, departments; build product_id -> 'Product: X. Aisle: Y. Department: Z.' map."""
+        products = pd.read_csv(self.data_dir / PRODUCTS_CSV)
+        aisles = pd.read_csv(self.data_dir / AISLES_CSV)
+        departments = pd.read_csv(self.data_dir / DEPARTMENTS_CSV)
+        products = products.merge(aisles, on="aisle_id").merge(departments, on="department_id")
+        products["text"] = (
+            "Product: "
+            + products["product_name"].astype(str)
+            + ". Aisle: "
+            + products["aisle"].astype(str)
+            + ". Department: "
+            + products["department"].astype(str)
+            + "."
+        )
+        return dict(zip(products["product_id"], products["text"]))
+
+    def _load_orders(self) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Load orders; split into target (eval_set=train) and history (eval_set=prior)."""
+        orders = pd.read_csv(self.data_dir / ORDERS_CSV)
+        if orders["order_hour_of_day"].dtype == object:
+            orders["order_hour_of_day"] = orders["order_hour_of_day"].astype(str).str.zfill(2)
+        cols = ["order_id", "user_id", "order_number", "order_dow", "order_hour_of_day", "days_since_prior_order"]
+        target = orders[orders["eval_set"] == EVAL_SET_TRAIN][cols].copy()
+        history = orders[orders["eval_set"] == EVAL_SET_PRIOR][cols].copy()
+        return target, history
+
+    def _build_order_to_products(self, history_order_ids: set[int]) -> dict[int, list[int]]:
+        """Build order_id -> [product_ids] from order_products__prior (chunked)."""
+        order_to_products: dict[int, list[int]] = defaultdict(list)
+        path = self.data_dir / ORDER_PRODUCTS_PRIOR_CSV
+        for chunk in pd.read_csv(path, chunksize=ORDER_PRODUCTS_CHUNK_SIZE):
+            chunk = chunk[chunk["order_id"].isin(history_order_ids)]
+            for order_id, product_id in chunk[["order_id", "product_id"]].itertuples(index=False):
+                order_to_products[order_id].append(product_id)
+        return dict(order_to_products)
+
+    def _build_user_context(
+        self,
+        target_orders: pd.DataFrame,
+        history_orders: pd.DataFrame,
+        order_to_products: dict[int, list[int]],
+        product_text_map: dict[int, str],
+    ) -> dict[int, str]:
+        """Build order_id -> user context string (prior orders + Next: clause)."""
+        history_orders = history_orders.sort_values(["user_id", "order_number"])
+        order_id_to_context: dict[int, str] = {}
+
+        for _, row in target_orders.iterrows():
+            order_id = int(row["order_id"])
+            user_history = history_orders[
+                (history_orders["user_id"] == row["user_id"]) & (history_orders["order_number"] < row["order_number"])
+            ].tail(self.max_prior_orders)
+
+            segments: list[str] = []
+            total_products = 0
+
+            for _, h in user_history.iterrows():
+                if total_products >= self.max_product_names:
+                    break
+                oid = int(h["order_id"])
+                order_products = []
+                for pid in order_to_products.get(oid, []):
+                    if pid not in product_text_map:
+                        continue
+                    if total_products >= self.max_product_names:
+                        break
+                    name = product_text_map[pid].split("Product: ")[1].split(".")[0].strip()
+                    order_products.append(name)
+                    total_products += 1
+
+                if not order_products:
+                    continue
+
+                dow = int(h["order_dow"])
+                hour = h["order_hour_of_day"] if isinstance(h["order_hour_of_day"], str) else str(int(h["order_hour_of_day"]))
+                time_prefix = f"w{dow}h{hour}" if pd.isna(h["days_since_prior_order"]) else f"+{int(h['days_since_prior_order'])}d w{dow}h{hour}"
+                segments.append(f"[{time_prefix}] " + ", ".join(order_products))
+
+            products_str = "; ".join(segments) if segments else "(no prior orders)"
+            row_dow = int(row["order_dow"])
+            row_hour = row["order_hour_of_day"] if isinstance(row["order_hour_of_day"], str) else str(int(row["order_hour_of_day"]))
+            next_clause = f"Next: w{row_dow}h{row_hour}" if pd.isna(row["days_since_prior_order"]) else f"Next: +{int(row['days_since_prior_order'])}d w{row_dow}h{row_hour}"
+            order_id_to_context[order_id] = f"{products_str}. {next_clause}"
+
+        return order_id_to_context
+
+    def _build_anchor_positive_pairs(
+        self, order_id_to_context: dict[int, str], product_text_map: dict[int, str]
+    ) -> tuple[list[str], list[str], list[int]]:
+        """Build (anchor, positive) pairs from order_products__train; anchor=context, positive=product text."""
+        train_op = pd.read_csv(self.data_dir / ORDER_PRODUCTS_TRAIN_CSV)
+        anchors, positives, order_ids = [], [], []
+        for _, row in train_op.iterrows():
+            order_id, product_id = row["order_id"], row["product_id"]
+            if order_id not in order_id_to_context or product_id not in product_text_map:
+                continue
+            anchors.append(order_id_to_context[order_id])
+            positives.append(product_text_map[product_id])
+            order_ids.append(order_id)
+        return anchors, positives, order_ids
+
+    def _split_train_eval(
+        self,
+        anchors: list[str],
+        positives: list[str],
+        order_ids: list[int],
+        order_id_to_context: dict[int, str],
+    ) -> tuple[list[str], list[str], list[str], list[str], set[int]]:
+        """Split pairs by order: last eval_frac of orders go to eval; rest to train."""
+        order_list = sorted(set(order_id_to_context.keys()))
+        n_eval = max(1, int(len(order_list) * self.eval_frac))
+        eval_order_ids = set(order_list[-n_eval:])
+
+        train_anchors, train_positives = [], []
+        eval_anchors, eval_positives = [], []
+        for a, p, oid in zip(anchors, positives, order_ids):
+            if oid in eval_order_ids:
+                eval_anchors.append(a)
+                eval_positives.append(p)
+            else:
+                train_anchors.append(a)
+                train_positives.append(p)
+        return train_anchors, train_positives, eval_anchors, eval_positives, eval_order_ids
+
+    def _build_eval_artifacts(
+        self,
+        eval_order_ids: set[int],
+        order_id_to_context: dict[int, str],
+        product_text_map: dict[int, str],
+    ) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]]]:
+        """Build eval_queries, eval_corpus, eval_relevant_docs for IR evaluator."""
+        if self.eval_serve_time:
+            eval_queries = {
+                str(oid): _strip_next_order_from_context(order_id_to_context[oid])
+                for oid in eval_order_ids
+                if oid in order_id_to_context
+            }
         else:
-            train_anchors.append(a)
-            train_positives.append(p)
+            eval_queries = {str(oid): order_id_to_context[oid] for oid in eval_order_ids if oid in order_id_to_context}
 
-    # Optionally subsample train pairs (e.g. for quick experiments).
-    if sample_frac is not None and sample_frac < 1.0:
-        train_df = pd.DataFrame({"anchor": train_anchors, "positive": train_positives})
-        train_df = train_df.sample(frac=sample_frac, random_state=seed)
-        train_anchors = train_df["anchor"].tolist()
-        train_positives = train_df["positive"].tolist()
+        eval_relevant_docs = {str(oid): [] for oid in eval_order_ids}
+        train_op = pd.read_csv(self.data_dir / ORDER_PRODUCTS_TRAIN_CSV)
+        for _, row in train_op.iterrows():
+            oid_str = str(int(row["order_id"]))
+            if oid_str in eval_relevant_docs:
+                eval_relevant_docs[oid_str].append(str(int(row["product_id"])))
 
-    train_dataset = Dataset.from_dict(
-        {"anchor": train_anchors, "positive": train_positives}
-    )
+        eval_corpus = {str(pid): text for pid, text in product_text_map.items()}
+        return eval_queries, eval_corpus, eval_relevant_docs
 
-    # Build eval artifacts for InformationRetrievalEvaluator: queries, corpus, relevant_docs.
-    # When eval_serve_time=True, strip " Next: ..." from queries so eval matches production (we don't know next order at serve time).
-    if eval_serve_time:
-        logger.info("  -> Eval queries: stripping 'Next:' clause (serve-time aligned)")
-        eval_queries = {
-            str(oid): strip_next_order_from_context(order_id_to_context[oid])
-            for oid in eval_order_ids
-            if oid in order_id_to_context
+    def _save_outputs(
+        self,
+        effective_dir: Path,
+        train_dataset: Dataset,
+        eval_dataset: Dataset | None,
+        eval_queries: dict,
+        eval_corpus: dict,
+        eval_relevant_docs: dict,
+    ) -> None:
+        """Write train/eval datasets, eval_queries.json, eval_corpus.json, eval_relevant_docs.json, data_prep_params.json."""
+        train_dataset.save_to_disk(str(effective_dir / TRAIN_DATASET_SUBDIR))
+        if eval_dataset is not None:
+            eval_dataset.save_to_disk(str(effective_dir / EVAL_DATASET_SUBDIR))
+        with open(effective_dir / EVAL_QUERIES_FILENAME, "w") as f:
+            json.dump(eval_queries, f, indent=0)
+        with open(effective_dir / EVAL_CORPUS_FILENAME, "w") as f:
+            json.dump(eval_corpus, f, indent=0)
+        with open(effective_dir / EVAL_RELEVANT_DOCS_FILENAME, "w") as f:
+            json.dump(eval_relevant_docs, f, indent=0)
+
+        params = {
+            "data_dir": str(self.data_dir),
+            "output_dir": str(effective_dir),
+            "max_prior_orders": self.max_prior_orders,
+            "max_product_names": self.max_product_names,
+            "sample_frac": self.sample_frac,
+            "eval_frac": self.eval_frac,
+            "eval_serve_time": self.eval_serve_time,
+            "max_target_orders": self.max_target_orders,
+            "seed": self.seed,
+            "n_train_pairs": len(train_dataset),
+            "n_eval_pairs": len(eval_dataset) if eval_dataset else 0,
+            "n_eval_queries": len(eval_queries),
+            "n_corpus": len(eval_corpus),
         }
-    else:
-        eval_queries = {
-            str(oid): order_id_to_context[oid]
-            for oid in eval_order_ids
-            if oid in order_id_to_context
-        }
-    eval_relevant_docs = {str(oid): set() for oid in eval_order_ids}
-    train_op = pd.read_csv(order_products_train_path)
-    for _, row in train_op.iterrows():
-        oid = int(row["order_id"])
-        oid_str = str(oid)
-        if oid_str in eval_relevant_docs:
-            eval_relevant_docs[oid_str].add(str(int(row["product_id"])))
-    eval_corpus = {str(pid): text for pid, text in product_text_map.items()}
-
-    eval_dataset = (
-        Dataset.from_dict({"anchor": eval_anchors, "positive": eval_positives})
-        if eval_anchors and eval_positives
-        else None
-    )
-    logger.info(
-        "  -> train: %d pairs, eval: %d pairs", len(train_anchors), len(eval_anchors)
-    )
-
-    # Save all outputs to effective_output_dir (param-based subdir).
-    logger.info("[Step 7/7] Saving outputs to %s...", effective_output_dir)
-    train_dataset.save_to_disk(str(effective_output_dir / TRAIN_DATASET_SUBDIR))
-    if eval_dataset is not None:
-        eval_dataset.save_to_disk(str(effective_output_dir / EVAL_DATASET_SUBDIR))
-    with open(effective_output_dir / EVAL_QUERIES_FILENAME, "w") as f:
-        json.dump(eval_queries, f, indent=0)
-    with open(effective_output_dir / EVAL_CORPUS_FILENAME, "w") as f:
-        json.dump(eval_corpus, f, indent=0)
-    with open(effective_output_dir / EVAL_RELEVANT_DOCS_FILENAME, "w") as f:
-        json.dump({k: list(v) for k, v in eval_relevant_docs.items()}, f, indent=0)
-
-    data_prep_params = {
-        "data_dir": str(data_dir),
-        "output_dir": str(effective_output_dir),
-        "max_prior_orders": max_prior_orders,
-        "max_product_names": max_product_names,
-        "sample_frac": sample_frac,
-        "eval_frac": eval_frac,
-        "eval_serve_time": eval_serve_time,
-        "max_target_orders": max_target_orders,
-        "seed": seed,
-        "n_train_pairs": len(train_anchors),
-        "n_eval_pairs": len(eval_anchors),
-        "n_eval_queries": len(eval_queries),
-        "n_corpus": len(eval_corpus),
-    }
-    with open(effective_output_dir / DATA_PREP_PARAMS_FILENAME, "w") as f:
-        json.dump(data_prep_params, f, indent=2)
-
-    logger.info("Done. Saved to %s", effective_output_dir)
-    logger.info(
-        "Train with: python -m src.train.train_sbert --processed-dir %s",
-        effective_output_dir,
-    )
-    return train_dataset, eval_dataset, eval_queries, eval_corpus, eval_relevant_docs
-
-
-def load_config(config_path: Path | None = None) -> dict:
-    """
-    Load data prep config from YAML. Paths are resolved relative to PROJECT_ROOT.
-
-    Args:
-        config_path: Path to config file. Default: config/data_prep.yaml.
-
-    Returns:
-        Config dict with resolved paths and typed values.
-    """
-    path = Path(config_path) if config_path else DEFAULT_CONFIG_DATA_PREP
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    with open(path) as f:
-        raw = yaml.safe_load(f) or {}
-
-    # Resolve paths relative to PROJECT_ROOT
-    data_dir = raw.get("data_dir", str(DEFAULT_DATA_DIR))
-    output_dir = raw.get("output_dir", str(DEFAULT_PROCESSED_DIR))
-    if not Path(data_dir).is_absolute():
-        data_dir = PROJECT_ROOT / data_dir
-    if not Path(output_dir).is_absolute():
-        output_dir = PROJECT_ROOT / output_dir
-
-    sample_frac = raw.get("sample_frac")
-    if sample_frac is not None:
-        sample_frac = float(sample_frac)
-    max_target_orders = raw.get("max_target_orders")
-    if max_target_orders is not None:
-        max_target_orders = int(max_target_orders)
-
-    return {
-        "data_dir": Path(data_dir),
-        "output_dir": Path(output_dir),
-        "max_prior_orders": int(raw.get("max_prior_orders", 5)),
-        "max_product_names": int(raw.get("max_product_names", 20)),
-        "sample_frac": sample_frac,
-        "eval_frac": float(raw.get("eval_frac", 0.1)),
-        "eval_serve_time": bool(raw.get("eval_serve_time", True)),
-        "max_target_orders": max_target_orders,
-        "seed": int(raw.get("seed", 42)),
-    }
+        with open(effective_dir / DATA_PREP_PARAMS_FILENAME, "w") as f:
+            json.dump(params, f, indent=2)
 
 
 def main() -> None:
-    """
-    CLI entrypoint: load config from YAML, call run(), and print summary.
-
-    Uses config/data_prep.yaml by default. Override with --config path/to/config.yaml.
-    """
+    """CLI entrypoint: load config from YAML, create InstacartDataLoader, call prepare()."""
     parser = argparse.ArgumentParser(description="Prepare Instacart data for two-tower SBERT training")
-    parser.add_argument("--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_DATA_PREP.relative_to(PROJECT_ROOT)})")
+    parser.add_argument(
+        "--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_DATA_PREP.relative_to(PROJECT_ROOT)})"
+    )
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    cfg = DataPrepConfig.load(args.config)
+    setup_colored_logging(quiet_loggers=["httpx", "httpcore", "huggingface_hub", "urllib3", "datasets"])
 
-    setup_colored_logging(
-        quiet_loggers=["httpx", "httpcore", "huggingface_hub", "urllib3", "datasets"],
+    loader = InstacartDataLoader(
+        data_dir=cfg.data_dir,
+        output_dir=cfg.output_dir,
+        max_prior_orders=cfg.max_prior_orders,
+        max_product_names=cfg.max_product_names,
+        sample_frac=cfg.sample_frac,
+        eval_frac=cfg.eval_frac,
+        eval_serve_time=cfg.eval_serve_time,
+        max_target_orders=cfg.max_target_orders,
+        seed=cfg.seed,
     )
+    train_ds, eval_ds, eq, ec, er = loader.prepare()
 
-    train_ds, eval_ds, eq, ec, er = run(
-        data_dir=cfg["data_dir"],
-        output_dir=cfg["output_dir"],
-        max_prior_orders=cfg["max_prior_orders"],
-        max_product_names=cfg["max_product_names"],
-        sample_frac=cfg["sample_frac"],
-        eval_frac=cfg["eval_frac"],
-        eval_serve_time=cfg["eval_serve_time"],
-        max_target_orders=cfg["max_target_orders"],
-        seed=cfg["seed"],
-    )
     logger.info("Train dataset size: %d", len(train_ds))
     if eval_ds is not None:
         logger.info("Eval dataset size: %d", len(eval_ds))
     logger.info("Eval queries: %d, corpus size: %d", len(eq), len(ec))
-    subdir = _params_subdir(
-        cfg["max_prior_orders"],
-        cfg["max_product_names"],
-        cfg["eval_frac"],
-        cfg["eval_serve_time"],
-        cfg["sample_frac"],
-        cfg["max_target_orders"],
-    )
-    logger.info("Saved to %s/%s", cfg["output_dir"], subdir)
+    logger.info("Saved to %s", loader._effective_output_dir())
 
 
 if __name__ == "__main__":

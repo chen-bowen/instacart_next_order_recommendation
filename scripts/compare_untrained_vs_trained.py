@@ -138,7 +138,7 @@ def _embedding_collapse_metrics(
 
 
 def load_config(config_path: Path | None = None) -> dict:
-    """Load compare config from YAML."""
+    """Load compare config from YAML. Returns processed_dir, model_dir, base_model, batch_size, sample_queries."""
     path = Path(config_path) if config_path else DEFAULT_CONFIG_COMPARE
     if not path.is_absolute():
         path = PROJECT_ROOT / path
@@ -154,6 +154,7 @@ def load_config(config_path: Path | None = None) -> dict:
 
 
 def main() -> None:
+    """CLI entrypoint: load both models, rank eval set, compute IR metrics and collapse indicators, print report."""
     parser = argparse.ArgumentParser(description="Compare untrained vs trained SBERT; report IR metrics and collapse indicators")
     parser.add_argument("--config", type=Path, default=None, help=f"Path to YAML config (default: {DEFAULT_CONFIG_COMPARE.relative_to(PROJECT_ROOT)})")
     args = parser.parse_args()
@@ -175,10 +176,10 @@ def main() -> None:
         logger.info("Sampled to %d queries", len(eval_queries))
 
     # ---- Untrained (frozen pretrained) ----
-    logger.info("Loading untrained model: %s", args.base_model)
-    untrained_model = SentenceTransformer(args.base_model)
+    logger.info("Loading untrained model: %s", cfg["base_model"])
+    untrained_model = SentenceTransformer(cfg["base_model"])
     logger.info("Ranking with untrained model...")
-    untrained_rankings, q_emb_u, c_emb_u = _rank_all(untrained_model, eval_queries, eval_corpus, batch_size=args.batch_size)
+    untrained_rankings, q_emb_u, c_emb_u = _rank_all(untrained_model, eval_queries, eval_corpus, batch_size=cfg["batch_size"])
     untrained_metrics = compute_ir_metrics(untrained_rankings, eval_relevant_docs)
     collapse_u = _embedding_collapse_metrics(q_emb_u, c_emb_u, "untrained")
 

@@ -70,6 +70,7 @@ class ItemItemCFBaseline:
         self._build()
 
     def _build(self) -> None:
+        """Load orders, order_products__prior, build co-occurrence and eval_order_to_history."""
         # Load orders: train orders (eval targets) and prior orders
         orders = pd.read_csv(self.data_dir / ORDERS_CSV)
         train_orders = orders[orders["eval_set"] == EVAL_SET_TRAIN][["order_id", "user_id", "order_number"]]

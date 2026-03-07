@@ -1,0 +1,14 @@
+# Baselines config (content-based SBERT, item-item CF)
+# Run: uv run python -m src.baselines
+# Override: uv run python -m src.baselines --config config/other.yaml
+
+# Paths: processed data from data prep; data_dir for raw order_products__prior (CF)
+processed_dir: processed
+data_dir: data
+
+# Content-based: same base model as SBERT but frozen (no fine-tuning)
+model_name: sentence-transformers/all-MiniLM-L6-v2
+
+# Run only one baseline: content_only (faster) or cf_only (CF reads full prior orders)
+content_only: false
+cf_only: false

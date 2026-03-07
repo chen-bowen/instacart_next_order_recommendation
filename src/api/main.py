@@ -28,20 +28,19 @@ from src.api.routes.feedback import router as feedback_router
 from src.api.routes.recommend import router as recommend_router
 from src.api.schemas import HealthResponse
 from src.constants import DEFAULT_CORPUS_PATH, DEFAULT_MODEL_DIR
-from src.inference.serve_recommendations import (
-    MonitoredRecommender,
-    load_monitored_recommender,
-)
+from src.inference.serve_recommendations import MonitoredRecommender
 
 logger = logging.getLogger(__name__)
 
 
 def _resolve_model_dir() -> Path:
+    """Resolve model path from MODEL_DIR env or default. Can be local path or Hugging Face model ID."""
     value = os.getenv("MODEL_DIR")
     return Path(value) if value else DEFAULT_MODEL_DIR
 
 
 def _resolve_corpus_path() -> Path:
+    """Resolve corpus JSON path from CORPUS_PATH env or default."""
     value = os.getenv("CORPUS_PATH")
     return Path(value) if value else DEFAULT_CORPUS_PATH
 
@@ -68,9 +67,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     model_dir = _resolve_model_dir()
     corpus_path = _resolve_corpus_path().resolve()
     logger.info("Loading recommender model_dir=%s corpus=%s", model_dir, corpus_path)
-    recommender: MonitoredRecommender = load_monitored_recommender(
-        model_dir=model_dir, corpus_path=corpus_path
-    )
+    recommender = MonitoredRecommender(model_dir=model_dir, corpus_path=corpus_path)
 
     # Set state variables
     app.state.recommender = recommender
@@ -147,6 +144,7 @@ async def health(request: Request) -> HealthResponse:
 @app.get("/ready", response_model=HealthResponse)
 @limiter.exempt
 async def ready(request: Request) -> HealthResponse:
+    """Readiness probe - returns ready when model and corpus are loaded. Exempt from rate limiting."""
     ready_flag = bool(getattr(request.app.state, "ready", False))
     if not ready_flag or not getattr(request.app.state, "recommender", None):
         # FastAPI will still return 200 for the response model; status override could be added if needed.
@@ -156,6 +154,7 @@ async def ready(request: Request) -> HealthResponse:
 
 app.include_router(recommend_router)
 app.include_router(feedback_router)
+
 
 # Prometheus metrics endpoint (scraped for Grafana, alerting, SLOs)
 # Explicit route avoids 307 redirect from mount; curl /metrics works directly.

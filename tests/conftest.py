@@ -55,13 +55,13 @@ def client(mock_recommender, tmp_path):
     """
     Test client with mocked recommender and temp feedback DB.
 
-    Patches load_monitored_recommender to avoid loading the real model.
+    Patches MonitoredRecommender to avoid loading the real model.
     Uses a temporary directory for the feedback database.
     """
     # Use temp path for feedback DB so tests don't touch real data
     db_path = tmp_path / "feedback.db"
     os.environ[ENV_FEEDBACK_DB_PATH] = str(db_path)
 
-    with patch("src.api.main.load_monitored_recommender", return_value=mock_recommender):
+    with patch("src.api.main.MonitoredRecommender", return_value=mock_recommender):
         with TestClient(app) as c:
             yield c
