@@ -362,18 +362,20 @@ The server **loads the model from local disk by default** (`models/two_tower_sbe
 | `CORPUS_HF_REPO_TYPE`| `dataset` or `model` for corpus fallback (default: `dataset`)                                             |
 | `FEEDBACK_DB_PATH` | Path to the SQLite database for feedback events (default: `data/feedback.db`)                             |
 | `INFERENCE_DEVICE` | Device for model inference: `cuda`, `mps` (Apple Silicon), or `cpu` (default: auto-detect)                |
-| `API_KEY`          | When set, require API key on `/recommend` and `/feedback` (X-API-Key or Authorization: Bearer)            |
-| `RATE_LIMIT`       | Rate limit per IP (default: `100/minute`). Health, ready, and metrics are exempt.                         |
+| `API_KEY`                    | When set, require API key on `/recommend`, `/feedback`, and `/admin/corpus` (X-API-Key or Authorization: Bearer) |
+| `MAX_CORPUS_UPLOAD_PRODUCTS`| Max products allowed for corpus upload (default: 100,000)                                                          |
+| `RATE_LIMIT`                 | Rate limit per IP (default: `100/minute`). Health, ready, metrics, and corpus upload are exempt.                   |
 
 ### Endpoints
 
-| Method | Path         | Description                                       |
-| ------ | ------------ | ------------------------------------------------- |
-| `POST` | `/recommend` | Get top-k product recommendations                 |
-| `POST` | `/feedback`  | Record feedback events (impression, click, etc.)  |
-| `GET`  | `/health`    | Liveness probe (exempt from rate limit)           |
-| `GET`  | `/ready`     | Readiness probe (model and corpus loaded)         |
-| `GET`  | `/metrics`   | Prometheus metrics (scrape for Grafana, alerting) |
+| Method | Path           | Description                                                                 |
+| ------ | -------------- | --------------------------------------------------------------------------- |
+| `POST` | `/recommend`   | Get top-k product recommendations                                           |
+| `POST` | `/feedback`    | Record feedback events (impression, click, etc.)                            |
+| `POST` | `/admin/corpus`| Upload product corpus (replaces in-memory recommender; no file mount needed)|
+| `GET`  | `/health`      | Liveness probe (exempt from rate limit)                                     |
+| `GET`  | `/ready`       | Readiness probe (model and corpus loaded)                                  |
+| `GET`  | `/metrics`     | Prometheus metrics (scrape for Grafana, alerting)                          |
 
 ### POST /recommend
 
@@ -442,6 +444,27 @@ Alternatively, for demos, provide a `user_id` (order_id as string) resolved via 
 
 - `request_id` — Use this to tie feedback events back to this recommendation.
 - `stats` — Optional; included when using `MonitoredRecommender` for latency and score metrics.
+
+### POST /admin/corpus
+
+Upload a product corpus to replace the in-memory recommender. Enables providing your own catalog without mounting files. Same auth as `/recommend` when `API_KEY` is set.
+
+**Request body:**
+
+```json
+{
+  "corpus": {
+    "product_id_1": "Product: Organic Milk. Aisle: milk. Department: dairy eggs.",
+    "product_id_2": "Product: Whole Wheat Bread. Aisle: bread. Department: bakery."
+  }
+}
+```
+
+Format: `product_id` (string) → product text (string), same as `eval_corpus.json`. Max products: `MAX_CORPUS_UPLOAD_PRODUCTS` (default 100,000).
+
+**Response:** `{"status": "ok", "n_products": N}`
+
+**Limitations:** `user_id` lookup in `/recommend` does not work with uploaded corpus (no `eval_queries.json`); use `user_context` directly. Corpus is in-memory only; container restart reverts to startup corpus.
 
 ### POST /feedback
 

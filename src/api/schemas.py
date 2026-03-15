@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class RecommendationRequest(BaseModel):
@@ -84,3 +84,26 @@ class HealthResponse(BaseModel):
     """Response for /health and /ready probes."""
 
     status: str = "ok"
+
+
+class CorpusUploadRequest(BaseModel):
+    """Request body for POST /admin/corpus. Corpus format: product_id -> product text."""
+
+    corpus: Dict[str, str] = Field(
+        ...,
+        description="Map of product_id (string) to product text (string), same format as eval_corpus.json.",
+    )
+
+    @field_validator("corpus")
+    @classmethod
+    def corpus_non_empty(cls, v: Dict[str, str]) -> Dict[str, str]:
+        if not v:
+            raise ValueError("corpus must be non-empty")
+        return v
+
+
+class CorpusUploadResponse(BaseModel):
+    """Response from POST /admin/corpus."""
+
+    status: str = "ok"
+    n_products: int = Field(..., description="Number of products in the uploaded corpus.")

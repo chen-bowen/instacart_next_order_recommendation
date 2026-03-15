@@ -2,7 +2,7 @@
 API endpoint tests for the Instacart recommendation service.
 
 Uses a mocked recommender to avoid loading the real model in CI.
-Covers /health, /ready, /recommend, /feedback, and /metrics.
+Covers /health, /ready, /recommend, /feedback, /admin/corpus, and /metrics.
 """
 
 from __future__ import annotations
@@ -168,6 +168,50 @@ class TestFeedbackEndpoint:
         }
         resp = client.post("/feedback", json=payload)
         assert resp.status_code == 422
+
+
+class TestCorpusUploadEndpoint:
+    """Tests for POST /admin/corpus: upload product corpus."""
+
+    def test_corpus_upload_returns_200(self, client, mock_recommender):
+        """Valid corpus upload should replace recommender and return 200."""
+        payload = {
+            "corpus": {
+                "p1": "Product: Milk. Aisle: dairy. Department: dairy eggs.",
+                "p2": "Product: Bread. Aisle: bread. Department: bakery.",
+            }
+        }
+        with patch("src.api.routes.corpus.MonitoredRecommender", return_value=mock_recommender):
+            resp = client.post("/admin/corpus", json=payload)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["n_products"] == 2
+
+    def test_corpus_upload_empty_returns_422(self, client):
+        """Empty corpus should fail validation."""
+        resp = client.post("/admin/corpus", json={"corpus": {}})
+        assert resp.status_code == 422
+
+    def test_corpus_upload_missing_corpus_returns_422(self, client):
+        """Missing corpus field should fail validation."""
+        resp = client.post("/admin/corpus", json={})
+        assert resp.status_code == 422
+
+    def test_corpus_upload_without_api_key_when_required_returns_401(self, tmp_path):
+        """When API_KEY is set, corpus upload without key should return 401."""
+        os.environ[ENV_FEEDBACK_DB_PATH] = str(tmp_path / "feedback.db")
+        os.environ["API_KEY"] = "secret-test-key"
+        try:
+            with patch("src.api.main.MonitoredRecommender"):
+                with TestClient(app) as c:
+                    resp = c.post(
+                        "/admin/corpus",
+                        json={"corpus": {"p1": "Product: Milk."}},
+                    )
+                    assert resp.status_code == 401
+        finally:
+            os.environ.pop("API_KEY", None)
 
 
 class TestMetricsEndpoint:

@@ -76,6 +76,9 @@ DEFAULT_CORPUS_PATH = PROJECT_ROOT / "processed" / "p5_mp20_ef0.1" / EVAL_CORPUS
 DEFAULT_CORPUS_HF_REPO = "chenbowen184/instacart-eval-corpus"
 DEFAULT_CORPUS_HF_REPO_TYPE = "dataset"
 
+# Corpus upload: max products allowed via POST /admin/corpus (env: MAX_CORPUS_UPLOAD_PRODUCTS)
+MAX_CORPUS_UPLOAD_PRODUCTS = 100_000
+
 # Feedback
 DEFAULT_FEEDBACK_DB_PATH = PROJECT_ROOT / "data" / "feedback.db"
 

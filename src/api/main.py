@@ -17,13 +17,14 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from slowapi.util import get_remote_address
 
 from src.api.feedback_store import init_db
+from src.api.limiter import limiter
 from src.api.metrics import API_REGISTRY, MODEL_LOADED
+from src.api.routes.corpus import router as corpus_router
 from src.api.routes.feedback import router as feedback_router
 from src.api.routes.recommend import router as recommend_router
 from src.api.schemas import HealthResponse
@@ -85,9 +86,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("Shutting down Instacart recommendation API service")
 
 
-# Rate limiter: default 100 req/min per IP; override with RATE_LIMIT env (e.g. "200/minute")
-_default_rate_limit = os.getenv("RATE_LIMIT", "100/minute")
-limiter = Limiter(key_func=get_remote_address, default_limits=[_default_rate_limit])
 
 # FastAPI app
 app = FastAPI(title="Instacart Next-Order Recommendation API", lifespan=lifespan)
@@ -156,6 +154,7 @@ async def ready(request: Request) -> HealthResponse:
 
 app.include_router(recommend_router)
 app.include_router(feedback_router)
+app.include_router(corpus_router)
 
 
 # Prometheus metrics endpoint (scraped for Grafana, alerting, SLOs)
