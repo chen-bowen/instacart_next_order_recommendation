@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 
 from src.constants import (
+    DEFAULT_CORPUS_HF_FILENAME,
     DEFAULT_CORPUS_HF_REPO,
     DEFAULT_CORPUS_HF_REPO_TYPE,
-    EVAL_CORPUS_FILENAME,
+    EVAL_QUERIES_FILENAME,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 _GRAY = "\033[90m"
@@ -139,20 +144,54 @@ def resolve_corpus_with_hf_fallback(
         raise FileNotFoundError(
             f"eval_corpus.json not found at {path}. Run data prep first:\n"
             "  uv run python -m src.data.prepare_instacart_sbert\n"
-            "Or set CORPUS_HF_REPO to download from Hugging Face (e.g. user/instacart-eval-corpus)."
+            f"Or set CORPUS_HF_REPO to download from Hugging Face (e.g. {DEFAULT_CORPUS_HF_REPO})."
         )
 
     from huggingface_hub import hf_hub_download
 
+    # Determine which filename to use from HF repo
+    # Use versioned filename pattern (e.g., instacart_eval_corpus_p5_mp20_ef0.1.json)
+    corpus_hf_filename = DEFAULT_CORPUS_HF_FILENAME
+    queries_hf_filename = corpus_hf_filename.replace("eval_corpus", "eval_queries")
+
     try:
-        downloaded = hf_hub_download(
+        downloaded_corpus = hf_hub_download(
             repo_id=repo,
-            filename=EVAL_CORPUS_FILENAME,
+            filename=corpus_hf_filename,
             repo_type=repo_type,
         )
-        return Path(downloaded)
+        corpus_local = Path(downloaded_corpus)
+
+        # Best-effort download of eval_queries.json into the same directory so that
+        # /recommend with user_id can find eval_queries.json next to the corpus.
+        try:
+            downloaded_queries = hf_hub_download(
+                repo_id=repo,
+                filename=queries_hf_filename,
+                repo_type=repo_type,
+            )
+            queries_local = Path(downloaded_queries)
+            target_queries = corpus_local.parent / EVAL_QUERIES_FILENAME
+            if not target_queries.exists():
+                try:
+                    shutil.copy2(queries_local, target_queries)
+                except OSError:
+                    logger.warning(
+                        "Failed to copy %s to %s; user_id-based queries may not be available.",
+                        queries_local,
+                        target_queries,
+                    )
+        except Exception:
+            # It's fine if eval_queries.json is not present; user_id lookup will just be unavailable.
+            logger.info(
+                "eval_queries.json not found in repo %s (type=%s); user_id lookup will be disabled.",
+                repo,
+                repo_type,
+            )
+
+        return corpus_local
     except Exception as e:
         raise FileNotFoundError(
             f"eval_corpus.json not found at {path} and download from {repo} failed: {e}\n"
-            "Run data prep first or upload corpus with: uv run python scripts/upload_corpus_to_hf.py"
+            "Run data prep first or upload artifacts with: uv run python scripts/upload_eval_artifacts_to_hf.py"
         ) from e
