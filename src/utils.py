@@ -11,6 +11,7 @@ from src.constants import (
     DEFAULT_CORPUS_HF_FILENAME,
     DEFAULT_CORPUS_HF_REPO,
     DEFAULT_CORPUS_HF_REPO_TYPE,
+    DEFAULT_QUERIES_HF_FILENAME,
     EVAL_QUERIES_FILENAME,
 )
 
@@ -124,7 +125,7 @@ def resolve_corpus_with_hf_fallback(
 
     Args:
         corpus_path: Local path to eval_corpus.json.
-        hf_repo: Hugging Face repo ID (e.g. user/instacart-eval-corpus). Overridden by CORPUS_HF_REPO env.
+        hf_repo: Hugging Face repo ID (e.g. user/product-artifacts). Overridden by CORPUS_HF_REPO env.
         hf_repo_type: 'dataset' or 'model'. Overridden by CORPUS_HF_REPO_TYPE env.
 
     Returns:
@@ -149,10 +150,9 @@ def resolve_corpus_with_hf_fallback(
 
     from huggingface_hub import hf_hub_download
 
-    # Determine which filename to use from HF repo
-    # Use versioned filename pattern (e.g., instacart_eval_corpus_p5_mp20_ef0.1.json)
+    # Determine which filenames to use from HF repo.
     corpus_hf_filename = DEFAULT_CORPUS_HF_FILENAME
-    queries_hf_filename = corpus_hf_filename.replace("eval_corpus", "eval_queries")
+    queries_hf_filename = DEFAULT_QUERIES_HF_FILENAME
 
     try:
         downloaded_corpus = hf_hub_download(

@@ -73,10 +73,11 @@ DEFAULT_MODEL_DIR = PROJECT_ROOT / "models" / "two_tower_sbert" / "final"
 DEFAULT_CORPUS_PATH = PROJECT_ROOT / "processed" / "p5_mp20_ef0.1" / EVAL_CORPUS_FILENAME
 
 # Hugging Face fallback when eval_corpus.json not found locally (env: CORPUS_HF_REPO, CORPUS_HF_REPO_TYPE)
-DEFAULT_CORPUS_HF_REPO = "chenbowen184/instacart-eval-artifacts"
+DEFAULT_CORPUS_HF_REPO = "chenbowen184/product-artifacts"
 DEFAULT_CORPUS_HF_REPO_TYPE = "dataset"
-# Default corpus filename in the HF repo (versioned naming: instacart_eval_corpus_{version}.json)
-DEFAULT_CORPUS_HF_FILENAME = "instacart_eval_corpus_p5_mp20_ef0.1.json"
+# Default filenames in HF repo (versioned naming)
+DEFAULT_CORPUS_HF_FILENAME = "product_catalog_corpus_p5_mp20_ef0.1.json"
+DEFAULT_QUERIES_HF_FILENAME = "product_queries_p5_mp20_ef0.1.json"
 
 # Corpus upload: max products allowed via POST /admin/corpus (env: MAX_CORPUS_UPLOAD_PRODUCTS)
 MAX_CORPUS_UPLOAD_PRODUCTS = 100_000
