@@ -106,16 +106,28 @@ async def recommend_endpoint(
     """
     start_time = time.perf_counter()
     try:
-        # Resolve user context string
+        # Resolve base user context string (behavioral signal)
         context = payload.user_context
         if context is None and payload.user_id is not None:
-            corpus_path: Path = getattr(request.app.state, "corpus_path", None) or recommender.corpus_path
+            corpus_path: Path = (
+                getattr(request.app.state, "corpus_path", None) or recommender.corpus_path
+            )
             eval_queries = _load_eval_queries(Path(corpus_path))
             context = eval_queries.get(str(payload.user_id))
-        if not context:
+
+        # If the caller provides an explicit `query`, use it as retrieval signal.
+        # Optionally combine it with the behavioral context for a stronger embedding.
+        if payload.query is not None and payload.query.strip():
+            retrieval_query = (
+                f"{payload.query} {context}" if context else payload.query
+            )
+        else:
+            retrieval_query = context
+
+        if not retrieval_query:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Either user_context or a resolvable user_id must be provided.",
+                detail="Either query (optional) must be provided, or user_context must be provided / user_id must be resolvable.",
             )
 
         # Generate request_id that clients can reuse when sending feedback.
@@ -126,14 +138,14 @@ async def recommend_endpoint(
         # MonitoredRecommender accepts user_id and sets last_metrics; plain Recommender ignores user_id
         if isinstance(recommender, MonitoredRecommender):
             results = recommender.recommend(
-                query=context,
+                query=retrieval_query,
                 top_k=payload.top_k,
                 user_id=user_id_str,
                 exclude_product_ids=exclude_ids,
             )
         else:
             results = recommender.recommend(
-                query=context,
+                query=retrieval_query,
                 top_k=payload.top_k,
                 exclude_product_ids=exclude_ids,
             )
@@ -171,7 +183,12 @@ async def recommend_endpoint(
             request_id,
             len(items),
         )
-        return RecommendationResponse(request_id=request_id, recommendations=items, stats=stats)
+        return RecommendationResponse(
+            request_id=request_id,
+            recommendations=items,
+            stats=stats,
+            purchase_history_used=context,
+        )
     except HTTPException:
         # Client errors (e.g. 400) — count as error, re-raise for FastAPI
         RECOMMENDATION_REQUESTS_TOTAL.labels(status="error").inc()

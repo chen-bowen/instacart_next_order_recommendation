@@ -14,6 +14,13 @@ from pydantic import BaseModel, Field, field_validator
 
 class RecommendationRequest(BaseModel):
     """Request body for POST /recommend. Provide user_context or user_id, plus top_k."""
+    query: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional search query text used as retrieval signal. "
+            "When provided, Stage 1 can use it to bias candidate retrieval."
+        ),
+    )
 
     user_context: Optional[str] = Field(
         default=None,
@@ -57,6 +64,10 @@ class RecommendationResponse(BaseModel):
     request_id: str
     recommendations: List[RecommendationItem]
     stats: Optional[InferenceStatistics] = None
+    purchase_history_used: Optional[str] = Field(
+        default=None,
+        description="Resolved purchase history string used to form retrieval query (context).",
+    )
 
 
 EventType = Literal["impression", "click", "add_to_cart", "purchase"]
